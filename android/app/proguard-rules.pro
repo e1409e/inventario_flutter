@@ -1,0 +1,2 @@
+-keep class com.github.lucas_pilla.libsql_dart.** { *; }
+-keepnames class com.github.lucas_pilla.libsql_dart.** { *; }
