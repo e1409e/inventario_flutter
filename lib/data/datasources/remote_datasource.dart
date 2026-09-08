@@ -1,4 +1,5 @@
 import 'package:libsql_dart/libsql_dart.dart';
+import 'dart:isolate';
 
 abstract class RemoteDataSource {
   Future<List<Map<String, dynamic>>> fetchProducts();
@@ -133,35 +134,59 @@ class TursoDataSource implements RemoteDataSource {
   @override
   Future<List<Map<String, dynamic>>> fetchTransactions() async {
     try {
-      // 1. Obtenemos todas las cabeceras
+      // 1. Las peticiones de red NO bloquean la UI porque son I/O, las dejamos aquí.
       final txs = await _client.query('SELECT * FROM transactions');
-      // 2. Obtenemos todos los items de detalle
       final items = await _client.query('SELECT * FROM transaction_items');
 
-      // 3. Anidamos los items dentro de su transacción correspondiente
-      return txs.map((tx) {
-        final txItems = items
-            .where((it) => it['transaction_id'] == tx['id'])
-            .toList();
+      // 2. Despachamos el trabajo intensivo de CPU al Isolate.
+      // El hilo principal queda libre inmediatamente para seguir dibujando la interfaz.
+      final resultadoFinal = await Isolate.run(() {
+        // Llamamos a una función estática pasándole los datos crudos.
+        return _procesarDatosEnSegundoPlano(txs.toList(), items.toList());
+      });
 
-        return {
-          'id': tx['id'],
-          'timestamp': tx['timestamp'],
-          'type': tx['type'],
-          'description': tx['description'],
-          'items': txItems
-              .map(
-                (i) => {
-                  'product_id': i['product_id'],
-                  'product_name': i['product_name'],
-                  'quantity': i['quantity'],
-                },
-              )
-              .toList(),
-        };
-      }).toList();
+      return resultadoFinal;
     } catch (e) {
       throw Exception("Error al obtener historial desde Turso: $e");
     }
+  }
+
+  // 3. Esta función DEBE ser estática (o estar fuera de la clase).
+  // Aquí ocurre la magia pesada sin afectar la pantalla.
+  static List<Map<String, dynamic>> _procesarDatosEnSegundoPlano(
+    List<dynamic> txs,
+    List<dynamic> items,
+  ) {
+    // Reutilizamos el algoritmo optimizado O(N+M)
+    final Map<String, List<Map<String, dynamic>>> itemsGroupedByTx = {};
+
+    for (var item in items) {
+      final txId = item['transaction_id'].toString();
+      if (!itemsGroupedByTx.containsKey(txId)) {
+        itemsGroupedByTx[txId] = [];
+      }
+      itemsGroupedByTx[txId]!.add(item as Map<String, dynamic>);
+    }
+
+    return txs.map((tx) {
+      final txId = tx['id'].toString();
+      final txItems = itemsGroupedByTx[txId] ?? [];
+
+      return {
+        'id': tx['id'],
+        'timestamp': tx['timestamp'],
+        'type': tx['type'],
+        'description': tx['description'],
+        'items': txItems
+            .map(
+              (i) => {
+                'product_id': i['product_id'],
+                'product_name': i['product_name'],
+                'quantity': i['quantity'],
+              },
+            )
+            .toList(),
+      };
+    }).toList();
   }
 }
