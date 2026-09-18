@@ -1,4 +1,4 @@
-# inventario_pro
+# INVENTARIO MULTIPLATAFORMA
 
 A new Flutter project.
 
