@@ -1,6 +1,7 @@
 import '../entities/product.dart';
 import '../entities/stock_status.dart';
 import '../entities/inventory_transaction.dart';
+import '../entities/paginated_transactions.dart';
 
 abstract class InventoryRepository {
   // --- GESTIÓN DE PRODUCTOS ---
@@ -28,6 +29,20 @@ abstract class InventoryRepository {
 
   /// Obtiene el historial completo de movimientos (cabeceras y detalles)
   Future<List<InventoryTransaction>> getTransactionHistory();
+
+  /// Obtiene el historial paginado directamente desde Turso
+  Future<PaginatedTransactions> getTransactionsPaginated({
+    required int page,
+    int pageSize = 15,
+    TransactionType? type,
+    String? searchQuery,
+  });
+
+  /// Obtiene el total agrupado de entradas o salidas de un día específico
+  Future<List<DailyProductMovement>> getDailyMovementsSummary({
+    required DateTime date,
+    required TransactionType type,
+  });
 
   // --- MODO EMERGENCIA Y SINCRONIZACIÓN ---
 

@@ -13,6 +13,9 @@ import '../models/transaction_model.dart';
 import 'package:drift/drift.dart';
 import 'package:flutter/foundation.dart';
 
+import '../../core/entities/paginated_transactions.dart';
+import 'package:intl/intl.dart';
+
 class InventoryRepositoryImpl implements InventoryRepository, SyncRepository {
   final LocalDatabase localDb;
   final RemoteDataSource remoteDataSource;
@@ -404,5 +407,87 @@ class InventoryRepositoryImpl implements InventoryRepository, SyncRepository {
       );
     }
     return history;
+  }
+
+  @override
+  Future<PaginatedTransactions> getTransactionsPaginated({
+    required int page,
+    int pageSize = 15,
+    TransactionType? type,
+    String? searchQuery,
+  }) async {
+    final offset = (page - 1) * pageSize;
+    final typeStr = type == null
+        ? null
+        : (type == TransactionType.inbound ? 'inbound' : 'outbound');
+
+    final result = await remoteDataSource.fetchTransactionsPaginated(
+      limit: pageSize,
+      offset: offset,
+      type: typeStr,
+      searchQuery: searchQuery,
+    );
+
+    final int total = result['total'] as int;
+    final rawList = result['transactions'] as List<Map<String, dynamic>>;
+
+    final transactions = rawList.map((txJson) {
+      final rawTime = txJson['timestamp'];
+      final parsedTime = rawTime is String
+          ? DateTime.tryParse(rawTime) ?? DateTime.now()
+          : DateTime.now();
+
+      final itemsList = txJson['items'] as List<dynamic>;
+
+      return InventoryTransaction(
+        id: txJson['id'].toString(),
+        timestamp: parsedTime,
+        type: txJson['type'] == 'inbound'
+            ? TransactionType.inbound
+            : TransactionType.outbound,
+        description: txJson['description']?.toString() ?? "Sin descripcion",
+        isSynced: true,
+        items: itemsList
+            .map(
+              (item) => TransactionItem(
+                productId: item['product_id'].toString(),
+                productName: item['product_name'].toString(),
+                quantity: (item['quantity'] as num).toDouble(),
+              ),
+            )
+            .toList(),
+      );
+    }).toList();
+
+    return PaginatedTransactions(
+      items: transactions,
+      totalCount: total,
+      currentPage: page,
+      pageSize: pageSize,
+    );
+  }
+
+  @override
+  Future<List<DailyProductMovement>> getDailyMovementsSummary({
+    required DateTime date,
+    required TransactionType type,
+  }) async {
+    final datePrefix = DateFormat('yyyy-MM-dd').format(date);
+    final typeStr = type == TransactionType.inbound ? 'inbound' : 'outbound';
+
+    final rawList = await remoteDataSource.fetchDailyMovementsSummary(
+      datePrefix: datePrefix,
+      type: typeStr,
+    );
+
+    return rawList.map((row) {
+      return DailyProductMovement(
+        productId: row['product_id'].toString(),
+        productName: row['product_name'].toString(),
+        unit: row['unit'].toString(),
+        sku: row['sku']?.toString(),
+        totalQuantity: (row['total_quantity'] as num).toDouble(),
+      );
+    }).toList();
   }
 }

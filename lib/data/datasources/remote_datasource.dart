@@ -7,6 +7,19 @@ abstract class RemoteDataSource {
   Future<void> uploadProduct(Map<String, dynamic> productJson);
   Future<List<Map<String, dynamic>>> fetchStockStatus();
   Future<List<Map<String, dynamic>>> fetchTransactions();
+
+  // --- NUEVOS MÉTODOS OPTIMIZADOS (TURSO DIRECTO) ---
+  Future<Map<String, dynamic>> fetchTransactionsPaginated({
+    required int limit,
+    required int offset,
+    String? type,
+    String? searchQuery,
+  });
+
+  Future<List<Map<String, dynamic>>> fetchDailyMovementsSummary({
+    required String datePrefix, // Formato 'YYYY-MM-DD'
+    required String type, // 'inbound' o 'outbound'
+  });
 }
 
 class TursoDataSource implements RemoteDataSource {
@@ -17,10 +30,7 @@ class TursoDataSource implements RemoteDataSource {
   @override
   Future<List<Map<String, dynamic>>> fetchProducts() async {
     try {
-      // .query() devuelve List<Map<String, dynamic>> directamente
       final rs = await _client.query('SELECT * FROM products');
-
-      // 'rs' ya es iterable, no usamos .rows
       return rs.map((row) {
         return {
           'id': row['id'],
@@ -28,8 +38,7 @@ class TursoDataSource implements RemoteDataSource {
           'unit': row['unit'],
           'sku': row['sku'],
           'min_stock': row['min_stock'],
-          'is_active':
-              row['is_active'] == 1, // En SQLite los booleanos son 0 o 1
+          'is_active': row['is_active'] == 1,
         };
       }).toList();
     } catch (e) {
@@ -51,7 +60,6 @@ class TursoDataSource implements RemoteDataSource {
           min_stock = excluded.min_stock, 
           is_active = excluded.is_active
         ''',
-        // Se usa el parámetro 'positional:' en lugar de 'args:'
         positional: [
           p['id'],
           p['name'],
@@ -118,7 +126,6 @@ class TursoDataSource implements RemoteDataSource {
   Future<List<Map<String, dynamic>>> fetchStockStatus() async {
     try {
       final rs = await _client.query('SELECT * FROM stock');
-
       return rs.map((row) {
         return {
           'product_id': row['product_id'],
@@ -132,16 +139,129 @@ class TursoDataSource implements RemoteDataSource {
   }
 
   @override
+  Future<Map<String, dynamic>> fetchTransactionsPaginated({
+    required int limit,
+    required int offset,
+    String? type,
+    String? searchQuery,
+  }) async {
+    try {
+      final List<String> conditions = [];
+      final List<Object?> args = [];
+
+      if (type != null && type.isNotEmpty) {
+        conditions.add('t.type = ?');
+        args.add(type);
+      }
+
+      if (searchQuery != null && searchQuery.trim().isNotEmpty) {
+        final pattern = '%${searchQuery.trim()}%';
+        conditions.add(
+          '(LOWER(t.description) LIKE LOWER(?) OR EXISTS ('
+          'SELECT 1 FROM transaction_items ti '
+          'WHERE ti.transaction_id = t.id AND LOWER(ti.product_name) LIKE LOWER(?)'
+          '))',
+        );
+        args.add(pattern);
+        args.add(pattern);
+      }
+
+      final whereClause = conditions.isEmpty
+          ? ''
+          : 'WHERE ${conditions.join(' AND ')}';
+
+      // 1. Contamos el total de registros que coinciden para armar la numeración de páginas
+      final countRs = await _client.query(
+        'SELECT COUNT(*) as total FROM transactions t $whereClause',
+        positional: args,
+      );
+      final int totalCount = countRs.isNotEmpty
+          ? (countRs.first['total'] as num).toInt()
+          : 0;
+
+      if (totalCount == 0) {
+        return {'total': 0, 'transactions': <Map<String, dynamic>>[]};
+      }
+
+      // 2. Traemos únicamente las cabeceras de la página solicitada
+      final txArgs = [...args, limit, offset];
+      final txsRs = await _client.query('''
+        SELECT t.* FROM transactions t
+        $whereClause
+        ORDER BY t.timestamp DESC
+        LIMIT ? OFFSET ?
+        ''', positional: txArgs);
+
+      if (txsRs.isEmpty) {
+        return {'total': totalCount, 'transactions': <Map<String, dynamic>>[]};
+      }
+
+      // 3. Traemos solo los items que pertenecen a los IDs de esta página
+      final txIds = txsRs.map((r) => r['id'].toString()).toList();
+      final placeholders = List.filled(txIds.length, '?').join(',');
+      final itemsRs = await _client.query(
+        'SELECT * FROM transaction_items WHERE transaction_id IN ($placeholders)',
+        positional: txIds,
+      );
+
+      final grouped = _procesarDatosEnSegundoPlano(
+        txsRs.toList(),
+        itemsRs.toList(),
+      );
+
+      return {'total': totalCount, 'transactions': grouped};
+    } catch (e) {
+      throw Exception("Error al obtener historial paginado desde Turso: $e");
+    }
+  }
+
+  @override
+  Future<List<Map<String, dynamic>>> fetchDailyMovementsSummary({
+    required String datePrefix,
+    required String type,
+  }) async {
+    try {
+      // Filtra por el día exacto (YYYY-MM-DD%) y agrupa sumando las cantidades por producto
+      final rs = await _client.query(
+        '''
+        SELECT 
+          ti.product_id,
+          ti.product_name,
+          COALESCE(p.unit, 'Und') as unit,
+          p.sku,
+          SUM(ti.quantity) as total_quantity
+        FROM transaction_items ti
+        INNER JOIN transactions t ON t.id = ti.transaction_id
+        LEFT JOIN products p ON p.id = ti.product_id
+        WHERE t.type = ? AND t.timestamp LIKE ?
+        GROUP BY ti.product_id, ti.product_name
+        HAVING total_quantity > 0
+        ORDER BY ti.product_name ASC
+        ''',
+        positional: [type, '$datePrefix%'],
+      );
+
+      return rs.map((row) {
+        return {
+          'product_id': row['product_id'],
+          'product_name': row['product_name'],
+          'unit': row['unit'] ?? 'Und',
+          'sku': row['sku'],
+          'total_quantity': (row['total_quantity'] as num).toDouble(),
+        };
+      }).toList();
+    } catch (e) {
+      throw Exception("Error al obtener reporte diario desde Turso: $e");
+    }
+  }
+
+  @override
   Future<List<Map<String, dynamic>>> fetchTransactions() async {
     try {
-      // 1. Las peticiones de red NO bloquean la UI porque son I/O, las dejamos aquí.
       final txs = await _client.query('SELECT * FROM transactions');
       final items = await _client.query('SELECT * FROM transaction_items');
 
-      // 2. Despachamos el trabajo intensivo de CPU al Isolate.
-      // El hilo principal queda libre inmediatamente para seguir dibujando la interfaz.
       final resultadoFinal = await Isolate.run(() {
-        // Llamamos a una función estática pasándole los datos crudos.
         return _procesarDatosEnSegundoPlano(txs.toList(), items.toList());
       });
 
@@ -151,13 +271,10 @@ class TursoDataSource implements RemoteDataSource {
     }
   }
 
-  // 3. Esta función DEBE ser estática (o estar fuera de la clase).
-  // Aquí ocurre la magia pesada sin afectar la pantalla.
   static List<Map<String, dynamic>> _procesarDatosEnSegundoPlano(
     List<dynamic> txs,
     List<dynamic> items,
   ) {
-    // Reutilizamos el algoritmo optimizado O(N+M)
     final Map<String, List<Map<String, dynamic>>> itemsGroupedByTx = {};
 
     for (var item in items) {
