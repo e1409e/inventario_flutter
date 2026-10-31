@@ -35,6 +35,7 @@ abstract class InventoryRepository {
     required int page,
     int pageSize = 15,
     TransactionType? type,
+    String? category,
     String? searchQuery,
   });
 
@@ -42,12 +43,24 @@ abstract class InventoryRepository {
   Future<List<DailyProductMovement>> getDailyMovementsSummary({
     required DateTime date,
     required TransactionType type,
+    String? category,
   });
 
   // --- MODO EMERGENCIA Y SINCRONIZACIÓN ---
 
   /// Sincroniza los datos locales pendientes con la nube (Supabase)
   Future<void> syncPendingData();
+
+  /// Obtiene las transacciones anteriores a la fecha de corte para respaldarlas
+  Future<List<InventoryTransaction>> getTransactionsOlderThan(
+    DateTime cutoffDate,
+  );
+
+  /// Guarda las transacciones antiguas en SQLite local (Drift) y las elimina de Turso
+  Future<int> archiveLocallyAndDeleteFromCloud(
+    List<InventoryTransaction> oldTransactions,
+    DateTime cutoffDate,
+  );
 
   /// Cambia entre base de datos local (SQLite) y nube
   void toggleEmergencyMode(bool isEnabled);

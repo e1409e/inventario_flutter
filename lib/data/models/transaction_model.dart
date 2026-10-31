@@ -8,31 +8,32 @@ class TransactionModel extends InventoryTransaction {
     required super.id,
     required super.timestamp,
     required super.type,
+    super.category = TransactionCategories.defaultCategory,
     required super.description,
     required super.items,
     super.isSynced,
   });
 
-  // --- MAPEO PARA SUPABASE (JSON) ---
-  // Nota: Supabase recibirá los items como una lista anidada
   Map<String, dynamic> toJson() {
     return {
       'id': id,
       'timestamp': timestamp.toIso8601String(),
       'type': type == TransactionType.inbound ? 'inbound' : 'outbound',
+      'category': category, // <-- Se envía a Turso
       'description': description,
       'is_synced': isSynced,
-      'items': items.map((item) => {
-        'product_id': item.productId,
-        'product_name': item.productName,
-        'quantity': item.quantity,
-      }).toList(),
+      'items': items
+          .map(
+            (item) => {
+              'product_id': item.productId,
+              'product_name': item.productName,
+              'quantity': item.quantity,
+            },
+          )
+          .toList(),
     };
   }
 
-  // --- MAPEO PARA DRIFT (SQLite) ---
-  
-  // Para la cabecera del movimiento
   TransactionsTableCompanion toDrift() {
     return TransactionsTableCompanion.insert(
       id: id,
@@ -43,13 +44,19 @@ class TransactionModel extends InventoryTransaction {
     );
   }
 
-  // Para los items individuales (se guardan en una tabla aparte en SQLite)
-  static List<TransactionItemsTableCompanion> itemsToDrift(String txId, List<TransactionItem> items) {
-    return items.map((item) => TransactionItemsTableCompanion.insert(
-      transactionId: txId,
-      productId: item.productId,
-      productName: item.productName,
-      quantity: item.quantity,
-    )).toList();
+  static List<TransactionItemsTableCompanion> itemsToDrift(
+    String txId,
+    List<TransactionItem> items,
+  ) {
+    return items
+        .map(
+          (item) => TransactionItemsTableCompanion.insert(
+            transactionId: txId,
+            productId: item.productId,
+            productName: item.productName,
+            quantity: item.quantity,
+          ),
+        )
+        .toList();
   }
 }

@@ -15,6 +15,7 @@ class ExcelReportExporter {
     required List<DailyProductMovement> movements,
     required DateTime reportDate,
     required TransactionType type,
+    String? category,
   }) async {
     final isInbound = type == TransactionType.inbound;
     final tipoStr = isInbound ? "ENTRADAS" : "SALIDAS";
@@ -26,6 +27,7 @@ class ExcelReportExporter {
     // Encabezado informativo
     buffer.writeln("TRIPLE AAA FOOD DISTRIBUTION - REPORTE DIARIO DE $tipoStr");
     buffer.writeln("FECHA OPERATIVA:;$dateDisplayStr");
+    buffer.writeln("CATEGORIA:;${(category ?? 'TODAS').toUpperCase()}");
     buffer.writeln("PRODUCTOS MOVILIZADOS:;${movements.length}");
     buffer.writeln("");
 

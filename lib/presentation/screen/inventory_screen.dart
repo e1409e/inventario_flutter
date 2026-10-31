@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:printing/printing.dart';
@@ -20,6 +21,7 @@ class _InventoryScreenState extends State<InventoryScreen> {
   final Set<String> _selectedProductIds = {};
   bool _isSelectionMode = false;
   String _searchQuery = "";
+  Timer? _searchDebounce;
 
   // Controles de Filtro Avanzado
   bool _showFilters = false;
@@ -29,9 +31,30 @@ class _InventoryScreenState extends State<InventoryScreen> {
 
   @override
   void dispose() {
+    _searchDebounce?.cancel();
     _minStockController.dispose();
     _maxStockController.dispose();
     super.dispose();
+  }
+
+  void _onSearchChanged(String val) {
+    if (_searchDebounce?.isActive ?? false) _searchDebounce!.cancel();
+    _searchDebounce = Timer(const Duration(milliseconds: 300), () {
+      if (mounted) {
+        setState(() {
+          _searchQuery = val.toLowerCase();
+        });
+      }
+    });
+  }
+
+  void _onNumericFilterChanged(String _) {
+    if (_searchDebounce?.isActive ?? false) _searchDebounce!.cancel();
+    _searchDebounce = Timer(const Duration(milliseconds: 300), () {
+      if (mounted) {
+        setState(() {});
+      }
+    });
   }
 
   // --- LÓGICA DE ESTADO LOCAL ---
@@ -63,25 +86,6 @@ class _InventoryScreenState extends State<InventoryScreen> {
       _isSelectionMode = true;
       _selectedProductIds.add(productId);
     });
-  }
-
-  double _getQuantityForProduct(String productId, List<StockStatus> stockList) {
-    final matches = stockList.where((s) => s.productId == productId);
-    if (matches.isNotEmpty) {
-      return matches.first.currentQuantity;
-    }
-    return 0.0;
-  }
-
-  DateTime? _getLastUpdateForProduct(
-    String productId,
-    List<StockStatus> stockList,
-  ) {
-    final matches = stockList.where((s) => s.productId == productId);
-    if (matches.isNotEmpty) {
-      return matches.first.lastUpdated;
-    }
-    return null;
   }
 
   Future<void> _selectDate(BuildContext context) async {
@@ -132,7 +136,6 @@ class _InventoryScreenState extends State<InventoryScreen> {
       );
 
       if (mounted) {
-        // Muestra la vista previa del PDF usando el paquete printing
         await Printing.layoutPdf(
           onLayout: (format) async => pdfBytes,
           name: 'Reporte_Inventario_TripleAAA.pdf',
@@ -205,7 +208,7 @@ class _InventoryScreenState extends State<InventoryScreen> {
     return Padding(
       padding: const EdgeInsets.all(16.0),
       child: TextField(
-        onChanged: (val) => setState(() => _searchQuery = val.toLowerCase()),
+        onChanged: _onSearchChanged,
         decoration: InputDecoration(
           hintText: "BUSCAR POR NOMBRE O SKU...",
           prefixIcon: const Icon(Icons.search, size: 20),
@@ -234,7 +237,7 @@ class _InventoryScreenState extends State<InventoryScreen> {
                 child: TextField(
                   controller: _minStockController,
                   keyboardType: TextInputType.number,
-                  onChanged: (_) => setState(() {}),
+                  onChanged: _onNumericFilterChanged,
                   style: const TextStyle(fontSize: 13),
                   decoration: const InputDecoration(
                     labelText: "Stock Mínimo",
@@ -248,7 +251,7 @@ class _InventoryScreenState extends State<InventoryScreen> {
                 child: TextField(
                   controller: _maxStockController,
                   keyboardType: TextInputType.number,
-                  onChanged: (_) => setState(() {}),
+                  onChanged: _onNumericFilterChanged,
                   style: const TextStyle(fontSize: 13),
                   decoration: const InputDecoration(
                     labelText: "Stock Máximo",
@@ -316,28 +319,30 @@ class _InventoryScreenState extends State<InventoryScreen> {
     List<Product> products,
     List<StockStatus> stockList,
   ) {
-    // Obtenemos valores de filtro numérico
     final double? minStock = double.tryParse(_minStockController.text);
     final double? maxStock = double.tryParse(_maxStockController.text);
 
-    // Filtrado en memoria (combinando búsqueda, cantidades y fechas)
+    // Indexamos el stock en un Mapa O(1) una sola vez para no recorrer listas anidadas
+    final Map<String, StockStatus> stockMap = {
+      for (final s in stockList) s.productId: s,
+    };
+
     final filteredProducts = products.where((p) {
-      // 1. Filtro de texto (Buscador)
-      final matchName = p.name.toLowerCase().contains(_searchQuery);
-      final matchSku = p.sku?.toLowerCase().contains(_searchQuery) ?? false;
-      if (!matchName && !matchSku) return false;
+      if (_searchQuery.isNotEmpty) {
+        final matchName = p.name.toLowerCase().contains(_searchQuery);
+        final matchSku = p.sku?.toLowerCase().contains(_searchQuery) ?? false;
+        if (!matchName && !matchSku) return false;
+      }
 
-      final currentStock = _getQuantityForProduct(p.id, stockList);
+      final stockEntry = stockMap[p.id];
+      final currentStock = stockEntry?.currentQuantity ?? 0.0;
 
-      // 2. Filtros Numéricos
       if (minStock != null && currentStock < minStock) return false;
       if (maxStock != null && currentStock > maxStock) return false;
 
-      // 3. Filtro de Fecha (Compara día, mes y año)
       if (_selectedDate != null) {
-        final lastUpdate = _getLastUpdateForProduct(p.id, stockList);
-        if (lastUpdate == null)
-          return false; // Si no tiene actualización, no cumple
+        final lastUpdate = stockEntry?.lastUpdated;
+        if (lastUpdate == null) return false;
 
         if (lastUpdate.year != _selectedDate!.year ||
             lastUpdate.month != _selectedDate!.month ||
@@ -349,7 +354,6 @@ class _InventoryScreenState extends State<InventoryScreen> {
       return true;
     }).toList();
 
-    // Manejo de estado vacío
     if (filteredProducts.isEmpty) {
       return Center(
         child: Column(
@@ -375,7 +379,7 @@ class _InventoryScreenState extends State<InventoryScreen> {
       itemCount: filteredProducts.length,
       itemBuilder: (context, index) {
         final product = filteredProducts[index];
-        final currentStock = _getQuantityForProduct(product.id, stockList);
+        final currentStock = stockMap[product.id]?.currentQuantity ?? 0.0;
 
         return ProductInventoryCard(
           product: product,

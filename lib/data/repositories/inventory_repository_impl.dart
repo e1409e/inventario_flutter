@@ -56,36 +56,23 @@ class InventoryRepositoryImpl implements InventoryRepository, SyncRepository {
     return null;
   }
 
-  // --- IMPLEMENTACIÓN DE PRODUCTOS ---
+  // --- IMPLEMENTACIÓN DE PRODUCTOS (TURSO DIRECTO EN MODO CLOUD) ---
 
   @override
   Future<List<Product>> getAllProducts() async {
     if (!_isEmergencyMode) {
       try {
         final remoteJson = await remoteDataSource.fetchProducts();
-        final remoteModels = remoteJson
-            .map((e) => ProductModel.fromJson(e))
-            .toList();
-
-        await localDb.transaction(() async {
-          for (var model in remoteModels) {
-            await localDb
-                .into(localDb.productsTable)
-                .insertOnConflictUpdate(model.toDrift());
-          }
-        });
-        return remoteModels;
-      } catch (e, stack) {
-        debugPrint("Fallo en getAllProducts (Modo Cloud). Mensaje: $e");
+        return remoteJson.map((e) => ProductModel.fromJson(e)).toList();
+      } catch (e) {
+        debugPrint(
+          "Turso bloqueado o sin red en getAllProducts, usando caché local: $e",
+        );
       }
     }
 
-    try {
-      final localData = await localDb.select(localDb.productsTable).get();
-      return localData.map((e) => ProductModel.fromDrift(e)).toList();
-    } catch (e) {
-      rethrow;
-    }
+    final localData = await localDb.select(localDb.productsTable).get();
+    return localData.map((e) => ProductModel.fromDrift(e)).toList();
   }
 
   @override
@@ -95,23 +82,17 @@ class InventoryRepositoryImpl implements InventoryRepository, SyncRepository {
       name: product.name,
       unit: product.unit,
       sku: product.sku,
-      isSynced: false,
+      isSynced: !_isEmergencyMode,
     );
+
+    if (!_isEmergencyMode) {
+      await remoteDataSource.uploadProduct(model.toJson());
+      return;
+    }
 
     await localDb
         .into(localDb.productsTable)
         .insertOnConflictUpdate(model.toDrift());
-
-    if (!_isEmergencyMode) {
-      try {
-        await remoteDataSource.uploadProduct(model.toJson());
-        await (localDb.update(localDb.productsTable)
-              ..where((t) => t.id.equals(product.id)))
-            .write(ProductsTableCompanion(isSynced: const Value(true)));
-      } catch (e) {
-        debugPrint("Fallo de red en saveProduct. Se sincronizará luego.");
-      }
-    }
   }
 
   @override
@@ -123,26 +104,20 @@ class InventoryRepositoryImpl implements InventoryRepository, SyncRepository {
       sku: product.sku,
       minStock: product.minStock,
       isActive: product.isActive,
-      isSynced: false,
+      isSynced: !_isEmergencyMode,
     );
+
+    if (!_isEmergencyMode) {
+      await remoteDataSource.uploadProduct(model.toJson());
+      return;
+    }
 
     await localDb
         .into(localDb.productsTable)
         .insertOnConflictUpdate(model.toDrift());
-
-    if (!_isEmergencyMode) {
-      try {
-        await remoteDataSource.uploadProduct(model.toJson());
-        await (localDb.update(localDb.productsTable)
-              ..where((t) => t.id.equals(product.id)))
-            .write(ProductsTableCompanion(isSynced: const Value(true)));
-      } catch (e) {
-        debugPrint("Fallo de red en updateProduct. Se sincronizará luego.");
-      }
-    }
   }
 
-  // --- REGISTRO DE TRANSACCIONES ---
+  // --- REGISTRO DE TRANSACCIONES (TURSO DIRECTO EN MODO CLOUD) ---
 
   @override
   Future<void> registerTransaction(InventoryTransaction transaction) async {
@@ -150,10 +125,16 @@ class InventoryRepositoryImpl implements InventoryRepository, SyncRepository {
       id: transaction.id,
       timestamp: transaction.timestamp,
       type: transaction.type,
+      category: transaction.category,
       description: transaction.description,
       items: transaction.items,
       isSynced: !_isEmergencyMode,
     );
+
+    if (!_isEmergencyMode) {
+      await remoteDataSource.uploadTransaction(txModel.toJson());
+      return;
+    }
 
     await localDb.transaction(() async {
       await localDb.into(localDb.transactionsTable).insert(txModel.toDrift());
@@ -182,18 +163,7 @@ class InventoryRepositoryImpl implements InventoryRepository, SyncRepository {
             );
       }
     });
-
-    if (!_isEmergencyMode) {
-      try {
-        await remoteDataSource.uploadTransaction(txModel.toJson());
-      } catch (e) {
-        debugPrint(
-          "Fallo de red en registerTransaction. Se sincronizará luego.",
-        );
-      }
-    }
   }
-
   // --- SINCRONIZACIÓN DIFERIDA ---
 
   @override
@@ -291,22 +261,14 @@ class InventoryRepositoryImpl implements InventoryRepository, SyncRepository {
     if (!_isEmergencyMode) {
       try {
         final remoteJson = await remoteDataSource.fetchStockStatus();
-        final remoteModels = remoteJson
-            .map((e) => StockModel.fromJson(e))
-            .toList();
-
-        await localDb.transaction(() async {
-          for (var model in remoteModels) {
-            await localDb
-                .into(localDb.stockTable)
-                .insertOnConflictUpdate(model.toDrift());
-          }
-        });
-        return remoteModels;
+        return remoteJson.map((e) => StockModel.fromJson(e)).toList();
       } catch (e) {
-        debugPrint("Error obteniendo stock de nube: $e");
+        debugPrint(
+          "Turso bloqueado o sin red en getAllStockStatus, usando caché local: $e",
+        );
       }
     }
+
     final data = await localDb.select(localDb.stockTable).get();
     return data.map((e) => StockModel.fromDrift(e)).toList();
   }
@@ -414,6 +376,7 @@ class InventoryRepositoryImpl implements InventoryRepository, SyncRepository {
     required int page,
     int pageSize = 15,
     TransactionType? type,
+    String? category,
     String? searchQuery,
   }) async {
     final offset = (page - 1) * pageSize;
@@ -425,11 +388,13 @@ class InventoryRepositoryImpl implements InventoryRepository, SyncRepository {
       limit: pageSize,
       offset: offset,
       type: typeStr,
+      category: category,
       searchQuery: searchQuery,
     );
 
-    final int total = result['total'] as int;
-    final rawList = result['transactions'] as List<Map<String, dynamic>>;
+    final int total = (result['total'] as num?)?.toInt() ?? 0;
+    // CORRECCIÓN CLAVE: Solo "as List?" sin subtipos para evitar el error de casteo
+    final List rawList = (result['transactions'] as List?) ?? [];
 
     final transactions = rawList.map((txJson) {
       final rawTime = txJson['timestamp'];
@@ -437,7 +402,7 @@ class InventoryRepositoryImpl implements InventoryRepository, SyncRepository {
           ? DateTime.tryParse(rawTime) ?? DateTime.now()
           : DateTime.now();
 
-      final itemsList = txJson['items'] as List<dynamic>;
+      final List itemsList = (txJson['items'] as List?) ?? [];
 
       return InventoryTransaction(
         id: txJson['id'].toString(),
@@ -445,6 +410,9 @@ class InventoryRepositoryImpl implements InventoryRepository, SyncRepository {
         type: txJson['type'] == 'inbound'
             ? TransactionType.inbound
             : TransactionType.outbound,
+        category:
+            txJson['category']?.toString() ??
+            TransactionCategories.defaultCategory,
         description: txJson['description']?.toString() ?? "Sin descripcion",
         isSynced: true,
         items: itemsList
@@ -471,6 +439,7 @@ class InventoryRepositoryImpl implements InventoryRepository, SyncRepository {
   Future<List<DailyProductMovement>> getDailyMovementsSummary({
     required DateTime date,
     required TransactionType type,
+    String? category,
   }) async {
     final datePrefix = DateFormat('yyyy-MM-dd').format(date);
     final typeStr = type == TransactionType.inbound ? 'inbound' : 'outbound';
@@ -478,6 +447,7 @@ class InventoryRepositoryImpl implements InventoryRepository, SyncRepository {
     final rawList = await remoteDataSource.fetchDailyMovementsSummary(
       datePrefix: datePrefix,
       type: typeStr,
+      category: category,
     );
 
     return rawList.map((row) {
@@ -489,5 +459,84 @@ class InventoryRepositoryImpl implements InventoryRepository, SyncRepository {
         totalQuantity: (row['total_quantity'] as num).toDouble(),
       );
     }).toList();
+  }
+
+  @override
+  Future<List<InventoryTransaction>> getTransactionsOlderThan(
+    DateTime cutoffDate,
+  ) async {
+    final cutoffIso = cutoffDate.toIso8601String();
+    final rawList = await remoteDataSource.fetchTransactionsOlderThan(
+      cutoffIso,
+    );
+
+    return rawList.map((txJson) {
+      final rawTime = txJson['timestamp'];
+      final parsedTime = rawTime is String
+          ? DateTime.tryParse(rawTime) ?? DateTime.now()
+          : DateTime.now();
+
+      final List itemsList = txJson['items'] as List;
+
+      return InventoryTransaction(
+        id: txJson['id'].toString(),
+        timestamp: parsedTime,
+        type: txJson['type'] == 'inbound'
+            ? TransactionType.inbound
+            : TransactionType.outbound,
+        category:
+            txJson['category']?.toString() ??
+            TransactionCategories.defaultCategory,
+        description: txJson['description']?.toString() ?? "Sin descripcion",
+        isSynced: true,
+        items: itemsList
+            .map(
+              (item) => TransactionItem(
+                productId: item['product_id'].toString(),
+                productName: item['product_name'].toString(),
+                quantity: (item['quantity'] as num).toDouble(),
+              ),
+            )
+            .toList(),
+      );
+    }).toList();
+  }
+
+  @override
+  Future<int> archiveLocallyAndDeleteFromCloud(
+    List<InventoryTransaction> oldTransactions,
+    DateTime cutoffDate,
+  ) async {
+    // 1. RESPALDO EN BASE DE DATOS LOCAL (SQLite / Drift)
+    await localDb.transaction(() async {
+      for (final tx in oldTransactions) {
+        final txModel = TransactionModel(
+          id: tx.id,
+          timestamp: tx.timestamp,
+          type: tx.type,
+          category: tx.category,
+          description: tx.description,
+          items: tx.items,
+          isSynced: true,
+        );
+
+        await localDb
+            .into(localDb.transactionsTable)
+            .insertOnConflictUpdate(txModel.toDrift());
+
+        await (localDb.delete(
+          localDb.transactionItemsTable,
+        )..where((t) => t.transactionId.equals(txModel.id))).go();
+
+        final driftItems = TransactionModel.itemsToDrift(txModel.id, tx.items);
+        for (final item in driftItems) {
+          await localDb.into(localDb.transactionItemsTable).insert(item);
+        }
+      }
+    });
+
+    // 2. BORRADO DEFINITIVO EN TURSO (Solo tras haber respaldado en Drift)
+    final cutoffIso = cutoffDate.toIso8601String();
+    return await remoteDataSource.deleteTransactionsOlderThan(cutoffIso);
   }
 }

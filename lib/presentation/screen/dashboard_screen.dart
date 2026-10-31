@@ -1,11 +1,13 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:intl/intl.dart';
+import '../../../core/utils/backup_exporter.dart';
 import '../state/inventory_cubit.dart';
 import '../state/inventory_state.dart';
 import '../widgets/menu_card.dart';
 import 'inventory_screen.dart';
 import 'transactions_screen.dart';
+
 import 'catalog_screen.dart';
 
 class DashboardScreen extends StatelessWidget {
@@ -145,6 +147,17 @@ class DashboardScreen extends StatelessWidget {
                     );
                   },
                 ),
+                const SizedBox(height: 12),
+
+                // CARD: PURGAR Y RESPALDAR HISTORIAL ANTIGUO (> 3 MESES)
+                MenuCard(
+                  title: "Mantenimiento de Base de Datos",
+                  subtitle:
+                      "Respaldar y liberar movimientos > 3 meses en Turso",
+                  icon: Icons.cleaning_services_rounded,
+                  color: Colors.redAccent,
+                  onTap: () => _showPurgeConfirmationDialog(context),
+                ),
               ],
             ),
           );
@@ -164,6 +177,259 @@ class DashboardScreen extends StatelessWidget {
         letterSpacing: 1.5,
       ),
     );
+  }
+
+  Future<void> _showPurgeConfirmationDialog(BuildContext context) async {
+    final repository = context.read<InventoryCubit>().repository;
+    // Fecha de corte: exactamente hace 90 días (3 meses)
+    final cutoffDate = DateTime.now().subtract(const Duration(days: 90));
+    final cutoffFormatted = DateFormat('dd/MM/yyyy').format(cutoffDate);
+
+    // 1. Mostramos indicador mientras consultamos cuántos registros viejos existen
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => const Center(child: CircularProgressIndicator()),
+    );
+
+    try {
+      final oldTransactions = await repository.getTransactionsOlderThan(
+        cutoffDate,
+      );
+
+      if (!context.mounted) return;
+      Navigator.pop(context); // Cierra el indicador de carga
+
+      if (oldTransactions.isEmpty) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              "No hay movimientos anteriores al $cutoffFormatted (más de 3 meses) para borrar.",
+            ),
+            backgroundColor: Colors.blueGrey,
+          ),
+        );
+        return;
+      }
+
+      // 2. Variables de selección de formatos de respaldo
+      bool exportJson = true;
+      bool exportExcel = true;
+      bool exportPdf = true;
+      bool isProcessing = false;
+
+      await showDialog(
+        context: context,
+        barrierDismissible: false,
+        builder: (dialogContext) {
+          return StatefulBuilder(
+            builder: (ctx, setDialogState) {
+              return AlertDialog(
+                backgroundColor: const Color(0xFF1E1E1E),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(12),
+                  side: const BorderSide(color: Colors.redAccent, width: 0.8),
+                ),
+                title: Row(
+                  children: const [
+                    Icon(Icons.warning_amber_rounded, color: Colors.redAccent),
+                    SizedBox(width: 10),
+                    Expanded(
+                      child: Text(
+                        "LIBERAR ESPACIO EN TURSO",
+                        style: TextStyle(
+                          fontSize: 15,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+                content: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      "Se encontraron ${oldTransactions.length} movimientos registrados antes del $cutoffFormatted (> 3 meses).",
+                      style: const TextStyle(fontSize: 13, color: Colors.white),
+                    ),
+                    const SizedBox(height: 8),
+                    const Text(
+                      "• Se guardará una copia en la BD Local (SQLite).\n"
+                      "• El stock actual de tus productos NO se verá afectado.\n"
+                      "• Selecciona los archivos descargables de respaldo:",
+                      style: TextStyle(fontSize: 11, color: Colors.white70),
+                    ),
+                    const SizedBox(height: 12),
+                    CheckboxListTile(
+                      value: exportJson,
+                      dense: true,
+                      contentPadding: EdgeInsets.zero,
+                      activeColor: Colors.blueAccent,
+                      title: const Text(
+                        "Respaldo JSON (Completo)",
+                        style: TextStyle(fontSize: 12),
+                      ),
+                      onChanged: isProcessing
+                          ? null
+                          : (v) => setDialogState(() => exportJson = v ?? true),
+                    ),
+                    CheckboxListTile(
+                      value: exportExcel,
+                      dense: true,
+                      contentPadding: EdgeInsets.zero,
+                      activeColor: Colors.greenAccent,
+                      title: const Text(
+                        "Respaldo Excel (CSV detallado)",
+                        style: TextStyle(fontSize: 12),
+                      ),
+                      onChanged: isProcessing
+                          ? null
+                          : (v) =>
+                                setDialogState(() => exportExcel = v ?? true),
+                    ),
+                    CheckboxListTile(
+                      value: exportPdf,
+                      dense: true,
+                      contentPadding: EdgeInsets.zero,
+                      activeColor: Colors.redAccent,
+                      title: const Text(
+                        "Reporte PDF de Auditoría",
+                        style: TextStyle(fontSize: 12),
+                      ),
+                      onChanged: isProcessing
+                          ? null
+                          : (v) => setDialogState(() => exportPdf = v ?? true),
+                    ),
+                    if (isProcessing) ...[
+                      const SizedBox(height: 14),
+                      Row(
+                        children: const [
+                          SizedBox(
+                            width: 16,
+                            height: 16,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          ),
+                          SizedBox(width: 12),
+                          Expanded(
+                            child: Text(
+                              "Generando respaldos y purgando Turso...",
+                              style: TextStyle(
+                                fontSize: 11,
+                                color: Colors.amberAccent,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ],
+                ),
+                actions: [
+                  TextButton(
+                    onPressed: isProcessing
+                        ? null
+                        : () => Navigator.pop(dialogContext),
+                    child: const Text(
+                      "CANCELAR",
+                      style: TextStyle(color: Colors.white54),
+                    ),
+                  ),
+                  ElevatedButton.icon(
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.redAccent,
+                      foregroundColor: Colors.white,
+                    ),
+                    onPressed: isProcessing
+                        ? null
+                        : () async {
+                            if (!exportJson && !exportExcel && !exportPdf) {
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                const SnackBar(
+                                  content: Text(
+                                    "Selecciona al menos un formato de archivo para respaldar antes de borrar.",
+                                  ),
+                                ),
+                              );
+                              return;
+                            }
+
+                            setDialogState(() => isProcessing = true);
+
+                            try {
+                              // A. Creamos y descargamos los archivos físicos
+                              final backupPath =
+                                  await BackupExporter.generateFullBackupFiles(
+                                    transactions: oldTransactions,
+                                    cutoffDate: cutoffDate,
+                                    exportJson: exportJson,
+                                    exportExcel: exportExcel,
+                                    exportPdf: exportPdf,
+                                  );
+
+                              // B. Respaldamos en SQLite Local (Drift) y borramos de Turso
+                              final deletedCount = await repository
+                                  .archiveLocallyAndDeleteFromCloud(
+                                    oldTransactions,
+                                    cutoffDate,
+                                  );
+
+                              if (dialogContext.mounted) {
+                                Navigator.pop(dialogContext);
+                              }
+
+                              if (context.mounted) {
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  SnackBar(
+                                    duration: const Duration(seconds: 6),
+                                    backgroundColor: Colors.teal.shade800,
+                                    content: Text(
+                                      "¡Éxito! $deletedCount movimientos antiguos eliminados de Turso.\nRespaldo guardado en: $backupPath",
+                                      style: const TextStyle(fontSize: 12),
+                                    ),
+                                  ),
+                                );
+                              }
+                            } catch (e) {
+                              setDialogState(() => isProcessing = false);
+                              if (context.mounted) {
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  SnackBar(
+                                    backgroundColor: Colors.redAccent,
+                                    content: Text(
+                                      "Operación cancelada por seguridad (no se borró nada en Turso): $e",
+                                    ),
+                                  ),
+                                );
+                              }
+                            }
+                          },
+                    icon: const Icon(Icons.backup_rounded, size: 16),
+                    label: const Text(
+                      "RESPALDAR Y BORRAR",
+                      style: TextStyle(
+                        fontSize: 11,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ),
+                ],
+              );
+            },
+          );
+        },
+      );
+    } catch (e) {
+      if (context.mounted) {
+        Navigator.pop(context);
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text("Error al verificar registros antiguos: $e"),
+            backgroundColor: Colors.redAccent,
+          ),
+        );
+      }
+    }
   }
 }
 

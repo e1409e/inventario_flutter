@@ -20,6 +20,9 @@ class _DailyReportSheetState extends State<DailyReportSheet> {
   bool _isLoading = true;
   String? _error;
 
+  String? _selectedInboundCategory;
+  String? _selectedOutboundCategory;
+
   List<DailyProductMovement> _inboundMovements = [];
   List<DailyProductMovement> _outboundMovements = [];
 
@@ -38,15 +41,16 @@ class _DailyReportSheetState extends State<DailyReportSheet> {
     try {
       final repo = context.read<InventoryCubit>().repository;
 
-      // Consultamos en paralelo el total de entradas y salidas del día elegido
       final results = await Future.wait([
         repo.getDailyMovementsSummary(
           date: _selectedDate,
           type: TransactionType.inbound,
+          category: _selectedInboundCategory,
         ),
         repo.getDailyMovementsSummary(
           date: _selectedDate,
           type: TransactionType.outbound,
+          category: _selectedOutboundCategory,
         ),
       ]);
 
@@ -89,9 +93,7 @@ class _DailyReportSheetState extends State<DailyReportSheet> {
     );
 
     if (picked != null && picked != _selectedDate) {
-      setState(() {
-        _selectedDate = picked;
-      });
+      setState(() => _selectedDate = picked);
       await _loadDailyData();
     }
   }
@@ -99,10 +101,13 @@ class _DailyReportSheetState extends State<DailyReportSheet> {
   Future<void> _exportPdf(TransactionType type) async {
     final isInbound = type == TransactionType.inbound;
     final data = isInbound ? _inboundMovements : _outboundMovements;
+    final category = isInbound
+        ? _selectedInboundCategory
+        : _selectedOutboundCategory;
 
     if (data.isEmpty) {
       _showSnack(
-        "No hay ${isInbound ? 'entradas' : 'salidas'} registradas en esta fecha.",
+        "No hay registros para exportar con este filtro.",
         isError: true,
       );
       return;
@@ -113,15 +118,19 @@ class _DailyReportSheetState extends State<DailyReportSheet> {
         movements: data,
         reportDate: _selectedDate,
         type: type,
+        category: category,
       );
 
       final dateStr = DateFormat('yyyy-MM-dd').format(_selectedDate);
       final tipoStr = isInbound ? 'Entradas' : 'Salidas';
+      final catSuffix = category != null
+          ? '_${category.replaceAll(' ', '')}'
+          : '';
 
       if (mounted) {
         await Printing.layoutPdf(
           onLayout: (format) async => pdfBytes,
-          name: 'Reporte_Diario_${tipoStr}_$dateStr.pdf',
+          name: 'Reporte_${tipoStr}${catSuffix}_$dateStr.pdf',
         );
       }
     } catch (e) {
@@ -132,10 +141,13 @@ class _DailyReportSheetState extends State<DailyReportSheet> {
   Future<void> _exportExcel(TransactionType type) async {
     final isInbound = type == TransactionType.inbound;
     final data = isInbound ? _inboundMovements : _outboundMovements;
+    final category = isInbound
+        ? _selectedInboundCategory
+        : _selectedOutboundCategory;
 
     if (data.isEmpty) {
       _showSnack(
-        "No hay ${isInbound ? 'entradas' : 'salidas'} registradas en esta fecha.",
+        "No hay registros para exportar con este filtro.",
         isError: true,
       );
       return;
@@ -147,6 +159,7 @@ class _DailyReportSheetState extends State<DailyReportSheet> {
             movements: data,
             reportDate: _selectedDate,
             type: type,
+            category: category,
           );
       _showSnack("Archivo Excel (CSV) listo: $resultPath");
     } catch (e) {
@@ -174,7 +187,6 @@ class _DailyReportSheetState extends State<DailyReportSheet> {
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // Encabezado del Modal
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
@@ -191,7 +203,7 @@ class _DailyReportSheetState extends State<DailyReportSheet> {
                   ),
                   SizedBox(height: 2),
                   Text(
-                    "Totales consolidados por producto y fecha única",
+                    "Filtra por fecha y por categoría específica",
                     style: TextStyle(fontSize: 11, color: Colors.white54),
                   ),
                 ],
@@ -203,8 +215,6 @@ class _DailyReportSheetState extends State<DailyReportSheet> {
             ],
           ),
           const Divider(color: Colors.white12, height: 24),
-
-          // Selector de Día
           Row(
             children: [
               const Text(
@@ -240,8 +250,7 @@ class _DailyReportSheetState extends State<DailyReportSheet> {
               ),
             ],
           ),
-          const SizedBox(height: 20),
-
+          const SizedBox(height: 18),
           if (_isLoading)
             const Padding(
               padding: EdgeInsets.symmetric(vertical: 30),
@@ -256,26 +265,35 @@ class _DailyReportSheetState extends State<DailyReportSheet> {
               ),
             )
           else ...[
-            // TARJETA 1: REPORTE DE ENTRADAS DEL DÍA
             _buildReportSectionCard(
               title: "REPORTE DE ENTRADAS",
               subtitle:
-                  "${_inboundMovements.length} productos ingresaron el $formattedDate",
+                  "${_inboundMovements.length} productos (${_selectedInboundCategory ?? 'Todas las categorías'})",
               color: Colors.greenAccent,
               icon: Icons.arrow_downward_rounded,
+              categories: TransactionCategories.inboundCategories,
+              selectedCategory: _selectedInboundCategory,
+              onCategoryChanged: (val) {
+                setState(() => _selectedInboundCategory = val);
+                _loadDailyData();
+              },
               items: _inboundMovements,
               onPdfTap: () => _exportPdf(TransactionType.inbound),
               onExcelTap: () => _exportExcel(TransactionType.inbound),
             ),
             const SizedBox(height: 14),
-
-            // TARJETA 2: REPORTE DE SALIDAS DEL DÍA
             _buildReportSectionCard(
               title: "REPORTE DE SALIDAS",
               subtitle:
-                  "${_outboundMovements.length} productos salieron el $formattedDate",
+                  "${_outboundMovements.length} productos (${_selectedOutboundCategory ?? 'Todas las categorías'})",
               color: Colors.orangeAccent,
               icon: Icons.arrow_upward_rounded,
+              categories: TransactionCategories.outboundCategories,
+              selectedCategory: _selectedOutboundCategory,
+              onCategoryChanged: (val) {
+                setState(() => _selectedOutboundCategory = val);
+                _loadDailyData();
+              },
               items: _outboundMovements,
               onPdfTap: () => _exportPdf(TransactionType.outbound),
               onExcelTap: () => _exportExcel(TransactionType.outbound),
@@ -292,6 +310,9 @@ class _DailyReportSheetState extends State<DailyReportSheet> {
     required String subtitle,
     required Color color,
     required IconData icon,
+    required List<String> categories,
+    required String? selectedCategory,
+    required ValueChanged<String?> onCategoryChanged,
     required List<DailyProductMovement> items,
     required VoidCallback onPdfTap,
     required VoidCallback onExcelTap,
@@ -341,12 +362,35 @@ class _DailyReportSheetState extends State<DailyReportSheet> {
                   ],
                 ),
               ),
+              DropdownButtonHideUnderline(
+                child: DropdownButton<String?>(
+                  value: selectedCategory,
+                  dropdownColor: const Color(0xFF262626),
+                  style: const TextStyle(
+                    fontSize: 11,
+                    fontFamily: 'monospace',
+                    color: Colors.white,
+                  ),
+                  items: [
+                    const DropdownMenuItem<String?>(
+                      value: null,
+                      child: Text("TODAS"),
+                    ),
+                    ...categories.map(
+                      (c) => DropdownMenuItem<String?>(
+                        value: c,
+                        child: Text(c.toUpperCase()),
+                      ),
+                    ),
+                  ],
+                  onChanged: onCategoryChanged,
+                ),
+              ),
             ],
           ),
           const SizedBox(height: 12),
           Row(
             children: [
-              // Botón PDF / Imprimir
               Expanded(
                 child: ElevatedButton.icon(
                   onPressed: hasData ? onPdfTap : null,
@@ -367,7 +411,6 @@ class _DailyReportSheetState extends State<DailyReportSheet> {
                 ),
               ),
               const SizedBox(width: 10),
-              // Botón EXCEL (CSV)
               Expanded(
                 child: OutlinedButton.icon(
                   onPressed: hasData ? onExcelTap : null,

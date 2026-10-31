@@ -156,6 +156,7 @@ class PdfReportGenerator {
     required List<DailyProductMovement> movements,
     required DateTime reportDate,
     required TransactionType type,
+    String? category,
   }) async {
     final pdf = pw.Document();
     final isInbound = type == TransactionType.inbound;
@@ -234,6 +235,14 @@ class PdfReportGenerator {
                         fontSize: 10,
                         fontWeight: pw.FontWeight.bold,
                         color: accentColor,
+                      ),
+                    ),
+                    pw.SizedBox(height: 2),
+                    pw.Text(
+                      "CATEGORÍA: ${(category ?? 'TODAS').toUpperCase()}",
+                      style: pw.TextStyle(
+                        fontSize: 9,
+                        fontWeight: pw.FontWeight.bold,
                       ),
                     ),
                     pw.SizedBox(height: 2),

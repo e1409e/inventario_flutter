@@ -7,25 +7,60 @@ abstract class RemoteDataSource {
   Future<void> uploadProduct(Map<String, dynamic> productJson);
   Future<List<Map<String, dynamic>>> fetchStockStatus();
   Future<List<Map<String, dynamic>>> fetchTransactions();
+  Future<List> fetchTransactionsOlderThan(String cutoffIso);
+  Future<int> deleteTransactionsOlderThan(String cutoffIso);
 
   // --- NUEVOS MÉTODOS OPTIMIZADOS (TURSO DIRECTO) ---
   Future<Map<String, dynamic>> fetchTransactionsPaginated({
     required int limit,
     required int offset,
     String? type,
+    String? category,
     String? searchQuery,
   });
 
   Future<List<Map<String, dynamic>>> fetchDailyMovementsSummary({
     required String datePrefix, // Formato 'YYYY-MM-DD'
     required String type, // 'inbound' o 'outbound'
+    String? category,
   });
 }
 
 class TursoDataSource implements RemoteDataSource {
   final LibsqlClient _client;
+  bool _schemaChecked = false;
 
   TursoDataSource(this._client);
+
+  Future<void> _ensureCategoryColumn() async {
+    if (_schemaChecked) return;
+    try {
+      await _client.execute(
+        "ALTER TABLE transactions ADD COLUMN category TEXT DEFAULT 'Sin Definir'",
+      );
+    } catch (_) {}
+
+    // ÍNDICES CRÍTICOS PARA EVITAR FULL TABLE SCANS EN TURSO (Ahorra 99.9% de Rows Read)
+    try {
+      await _client.execute(
+        'CREATE INDEX IF NOT EXISTS idx_tx_items_tx_id ON transaction_items(transaction_id)',
+      );
+      await _client.execute(
+        'CREATE INDEX IF NOT EXISTS idx_tx_timestamp ON transactions(timestamp DESC)',
+      );
+      await _client.execute(
+        'CREATE INDEX IF NOT EXISTS idx_tx_type_timestamp ON transactions(type, timestamp DESC)',
+      );
+      await _client.execute(
+        'CREATE INDEX IF NOT EXISTS idx_tx_category ON transactions(category)',
+      );
+      await _client.execute(
+        'CREATE INDEX IF NOT EXISTS idx_stock_prod_id ON stock(product_id)',
+      );
+    } catch (_) {}
+
+    _schemaChecked = true;
+  }
 
   @override
   Future<List<Map<String, dynamic>>> fetchProducts() async {
@@ -76,14 +111,16 @@ class TursoDataSource implements RemoteDataSource {
 
   @override
   Future<void> uploadTransaction(Map<String, dynamic> txJson) async {
+    await _ensureCategoryColumn();
     final tx = await _client.transaction();
     try {
       await tx.execute(
-        'INSERT INTO transactions (id, timestamp, type, description) VALUES (?, ?, ?, ?)',
+        'INSERT INTO transactions (id, timestamp, type, category, description) VALUES (?, ?, ?, ?, ?)',
         positional: [
           txJson['id'],
           txJson['timestamp'],
           txJson['type'],
+          txJson['category'] ?? 'Sin Definir',
           txJson['description'],
         ],
       );
@@ -143,8 +180,10 @@ class TursoDataSource implements RemoteDataSource {
     required int limit,
     required int offset,
     String? type,
+    String? category,
     String? searchQuery,
   }) async {
+    await _ensureCategoryColumn();
     try {
       final List<String> conditions = [];
       final List<Object?> args = [];
@@ -154,12 +193,18 @@ class TursoDataSource implements RemoteDataSource {
         args.add(type);
       }
 
+      if (category != null && category.isNotEmpty) {
+        conditions.add("COALESCE(t.category, 'Sin Definir') = ?");
+        args.add(category);
+      }
+
       if (searchQuery != null && searchQuery.trim().isNotEmpty) {
         final pattern = '%${searchQuery.trim()}%';
         conditions.add(
-          '(LOWER(t.description) LIKE LOWER(?) OR EXISTS ('
-          'SELECT 1 FROM transaction_items ti '
-          'WHERE ti.transaction_id = t.id AND LOWER(ti.product_name) LIKE LOWER(?)'
+          '(LOWER(t.description) LIKE LOWER(?) OR '
+          't.id IN ('
+          'SELECT ti.transaction_id FROM transaction_items ti '
+          'WHERE LOWER(ti.product_name) LIKE LOWER(?)'
           '))',
         );
         args.add(pattern);
@@ -170,7 +215,6 @@ class TursoDataSource implements RemoteDataSource {
           ? ''
           : 'WHERE ${conditions.join(' AND ')}';
 
-      // 1. Contamos el total de registros que coinciden para armar la numeración de páginas
       final countRs = await _client.query(
         'SELECT COUNT(*) as total FROM transactions t $whereClause',
         positional: args,
@@ -180,10 +224,9 @@ class TursoDataSource implements RemoteDataSource {
           : 0;
 
       if (totalCount == 0) {
-        return {'total': 0, 'transactions': <Map<String, dynamic>>[]};
+        return {'total': 0, 'transactions': []};
       }
 
-      // 2. Traemos únicamente las cabeceras de la página solicitada
       final txArgs = [...args, limit, offset];
       final txsRs = await _client.query('''
         SELECT t.* FROM transactions t
@@ -193,10 +236,9 @@ class TursoDataSource implements RemoteDataSource {
         ''', positional: txArgs);
 
       if (txsRs.isEmpty) {
-        return {'total': totalCount, 'transactions': <Map<String, dynamic>>[]};
+        return {'total': totalCount, 'transactions': []};
       }
 
-      // 3. Traemos solo los items que pertenecen a los IDs de esta página
       final txIds = txsRs.map((r) => r['id'].toString()).toList();
       final placeholders = List.filled(txIds.length, '?').join(',');
       final itemsRs = await _client.query(
@@ -219,27 +261,37 @@ class TursoDataSource implements RemoteDataSource {
   Future<List<Map<String, dynamic>>> fetchDailyMovementsSummary({
     required String datePrefix,
     required String type,
+    String? category,
   }) async {
+    await _ensureCategoryColumn();
     try {
-      // Filtra por el día exacto (YYYY-MM-DD%) y agrupa sumando las cantidades por producto
-      final rs = await _client.query(
-        '''
+      // Usamos rango >= y <= para que SQLite use el índice idx_tx_type_timestamp sin escanear toda la tabla
+      final startOfDay = '${datePrefix}T00:00:00';
+      final endOfDay = '${datePrefix}T23:59:59.999999';
+
+      final List<Object?> args = [type, startOfDay, endOfDay];
+      String categoryClause = '';
+
+      if (category != null && category.isNotEmpty) {
+        categoryClause = "AND COALESCE(t.category, 'Sin Definir') = ?";
+        args.add(category);
+      }
+
+      final rs = await _client.query('''
         SELECT 
           ti.product_id,
           ti.product_name,
           COALESCE(p.unit, 'Und') as unit,
           p.sku,
           SUM(ti.quantity) as total_quantity
-        FROM transaction_items ti
-        INNER JOIN transactions t ON t.id = ti.transaction_id
+        FROM transactions t
+        INNER JOIN transaction_items ti ON ti.transaction_id = t.id
         LEFT JOIN products p ON p.id = ti.product_id
-        WHERE t.type = ? AND t.timestamp LIKE ?
+        WHERE t.type = ? AND t.timestamp >= ? AND t.timestamp <= ? $categoryClause
         GROUP BY ti.product_id, ti.product_name
         HAVING total_quantity > 0
         ORDER BY ti.product_name ASC
-        ''',
-        positional: [type, '$datePrefix%'],
-      );
+        ''', positional: args);
 
       return rs.map((row) {
         return {
@@ -293,6 +345,7 @@ class TursoDataSource implements RemoteDataSource {
         'id': tx['id'],
         'timestamp': tx['timestamp'],
         'type': tx['type'],
+        'category': tx['category'] ?? 'Sin Definir',
         'description': tx['description'],
         'items': txItems
             .map(
@@ -305,5 +358,74 @@ class TursoDataSource implements RemoteDataSource {
             .toList(),
       };
     }).toList();
+  }
+
+  @override
+  Future<List> fetchTransactionsOlderThan(String cutoffIso) async {
+    await _ensureCategoryColumn();
+    try {
+      final txsRs = await _client.query(
+        'SELECT * FROM transactions WHERE timestamp < ? ORDER BY timestamp ASC',
+        positional: [cutoffIso],
+      );
+
+      if (txsRs.isEmpty) return [];
+
+      final itemsRs = await _client.query(
+        '''
+        SELECT ti.* FROM transaction_items ti
+        INNER JOIN transactions t ON t.id = ti.transaction_id
+        WHERE t.timestamp < ?
+        ''',
+        positional: [cutoffIso],
+      );
+
+      return _procesarDatosEnSegundoPlano(txsRs.toList(), itemsRs.toList());
+    } catch (e) {
+      throw Exception("Error al consultar movimientos antiguos en Turso: $e");
+    }
+  }
+
+  @override
+  Future<int> deleteTransactionsOlderThan(String cutoffIso) async {
+    final tx = await _client.transaction();
+    try {
+      // 1. Contamos cuántos registros se van a eliminar
+      final countRs = await tx.query(
+        'SELECT COUNT(*) as total FROM transactions WHERE timestamp < ?',
+        positional: [cutoffIso],
+      );
+      final int deletedCount = countRs.isNotEmpty
+          ? (countRs.first['total'] as num).toInt()
+          : 0;
+
+      if (deletedCount == 0) {
+        await tx.rollback();
+        return 0;
+      }
+
+      // 2. Borramos primero el detalle (transaction_items) de esas transacciones
+      await tx.execute(
+        '''
+        DELETE FROM transaction_items 
+        WHERE transaction_id IN (
+          SELECT id FROM transactions WHERE timestamp < ?
+        )
+        ''',
+        positional: [cutoffIso],
+      );
+
+      // 3. Borramos las cabeceras antiguas (transactions) sin tocar el stock actual
+      await tx.execute(
+        'DELETE FROM transactions WHERE timestamp < ?',
+        positional: [cutoffIso],
+      );
+
+      await tx.commit();
+      return deletedCount;
+    } catch (e) {
+      await tx.rollback();
+      throw Exception("Error al purgar movimientos antiguos en Turso: $e");
+    }
   }
 }

@@ -5,6 +5,7 @@ import 'inventory_state.dart';
 import '../../../core/entities/inventory_transaction.dart';
 import '../../../core/entities/transaction_item.dart';
 import '../../../core/entities/product.dart';
+import '../../../core/entities/stock_status.dart';
 import 'package:flutter/foundation.dart';
 
 class InventoryCubit extends Cubit<InventoryState> {
@@ -13,30 +14,21 @@ class InventoryCubit extends Cubit<InventoryState> {
 
   InventoryCubit({required this.repository}) : super(InventoryLoading());
 
-  /// Carga inicial de datos con orquestación de sincronización
+  /// Carga inicial de datos en paralelo desde Turso
   Future<void> loadInventory() async {
-    // 1. Identificamos el modo de conexión actual
     bool isEmergency = false;
     if (state is InventoryLoaded) {
       isEmergency = (state as InventoryLoaded).isEmergencyMode;
     }
 
     try {
-      // 2. Si estamos en modo CLOUD, intentamos sincronizar antes de mostrar
-      // Esto garantiza que si hubo cambios en la PC, el teléfono los baje ahora.
-      if (!isEmergency) {
-        try {
-          await repository.syncPendingData();
-          // Nota: El repositorio debería actualizar la caché local (SQLite)
-          // automáticamente dentro de sus métodos de fetch en modo Cloud.
-        } catch (e) {
-          debugPrint("Fallo sincronizacion silenciosa: $e");
-        }
-      }
+      // Disparamos ambas consultas al mismo tiempo (en paralelo)
+      final productsFuture = repository.getAllProducts();
+      final stockFuture = repository.getAllStockStatus();
 
-      // 3. Obtenemos la data (el repo decide si de Supabase o SQLite)
-      final products = await repository.getAllProducts();
-      final stock = await repository.getAllStockStatus();
+      // Esperamos los resultados ya tipados
+      final products = await productsFuture;
+      final stock = await stockFuture;
 
       emit(
         InventoryLoaded(
@@ -87,17 +79,19 @@ class InventoryCubit extends Cubit<InventoryState> {
   Future<void> registerMovement({
     required TransactionType type,
     required Map<String, double> items,
+    String? category,
     String? description,
+    DateTime? customDate,
   }) async {
     try {
       final currentState = state;
       if (currentState is! InventoryLoaded) return;
 
       final transaction = InventoryTransaction(
-        id: _uuid
-            .v4(), // Cambiado a UUID compatible con la clave primaria de la nube
-        timestamp: DateTime.now(),
+        id: _uuid.v4(),
+        timestamp: customDate ?? DateTime.now(),
         type: type,
+        category: category ?? TransactionCategories.defaultCategory,
         description: description ?? "Sin descripcion",
         items: items.entries.map((e) {
           final product = currentState.products.firstWhere(

@@ -19,6 +19,7 @@ class TransactionsScreen extends StatefulWidget {
 class _TransactionsScreenState extends State<TransactionsScreen> {
   String _searchQuery = "";
   TransactionType? _selectedType;
+  String? _selectedCategory; // null = Todas las categorías
   int _currentPage = 1;
   static const int _pageSize = 15;
   Timer? _debounce;
@@ -45,6 +46,7 @@ class _TransactionsScreenState extends State<TransactionsScreen> {
           page: _currentPage,
           pageSize: _pageSize,
           type: _selectedType,
+          category: _selectedCategory,
           searchQuery: _searchQuery,
         );
   }
@@ -54,7 +56,7 @@ class _TransactionsScreenState extends State<TransactionsScreen> {
     _debounce = Timer(const Duration(milliseconds: 400), () {
       setState(() {
         _searchQuery = val.toLowerCase();
-        _currentPage = 1; // Volvemos a la página 1 al filtrar
+        _currentPage = 1;
         _loadPage();
       });
     });
@@ -63,6 +65,16 @@ class _TransactionsScreenState extends State<TransactionsScreen> {
   void _onFilterTypeChanged(TransactionType? type) {
     setState(() {
       _selectedType = type;
+      _selectedCategory =
+          null; // Reinicia la categoría al cambiar entre Entrada/Salida
+      _currentPage = 1;
+      _loadPage();
+    });
+  }
+
+  void _onFilterCategoryChanged(String? category) {
+    setState(() {
+      _selectedCategory = category;
       _currentPage = 1;
       _loadPage();
     });
@@ -135,6 +147,7 @@ class _TransactionsScreenState extends State<TransactionsScreen> {
           ),
 
           // 2. BARRA DE FILTROS + MENÚ COMPACTO DE REGISTRO
+          // 2. BARRA DE FILTROS + CATEGORÍA + MENÚ COMPACTO DE REGISTRO
           Padding(
             padding: const EdgeInsets.symmetric(
               horizontal: 16.0,
@@ -142,7 +155,6 @@ class _TransactionsScreenState extends State<TransactionsScreen> {
             ),
             child: Row(
               children: [
-                // Chips de filtro con scroll horizontal por si la pantalla es muy angosta
                 Expanded(
                   child: SingleChildScrollView(
                     scrollDirection: Axis.horizontal,
@@ -153,13 +165,13 @@ class _TransactionsScreenState extends State<TransactionsScreen> {
                         _buildFilterChip("ENTRADAS", TransactionType.inbound),
                         const SizedBox(width: 6),
                         _buildFilterChip("SALIDAS", TransactionType.outbound),
+                        const SizedBox(width: 10),
+                        _buildCategoryFilterDropdown(),
                       ],
                     ),
                   ),
                 ),
                 const SizedBox(width: 8),
-
-                // MENÚ DESPLEGABLE COMPACTO (No estorba el historial)
                 _buildCompactActionMenu(context),
               ],
             ),
@@ -497,6 +509,70 @@ class _TransactionsScreenState extends State<TransactionsScreen> {
     );
   }
 
+  Widget _buildCategoryFilterDropdown() {
+    // Si eligió ENTRADAS o SALIDAS muestra sus categorías; si está en TODOS muestra ambas sin duplicar
+    final List<String> availableCategories = _selectedType != null
+        ? TransactionCategories.forType(_selectedType!)
+        : <String>{
+            ...TransactionCategories.inboundCategories,
+            ...TransactionCategories.outboundCategories,
+          }.toList();
+
+    final bool hasCategoryFilter = _selectedCategory != null;
+
+    return Container(
+      height: 32,
+      padding: const EdgeInsets.symmetric(horizontal: 8),
+      decoration: BoxDecoration(
+        color: hasCategoryFilter
+            ? Colors.amberAccent.withValues(alpha: 0.15)
+            : Colors.white.withValues(alpha: 0.04),
+        borderRadius: BorderRadius.circular(4),
+        border: Border.all(
+          color: hasCategoryFilter ? Colors.amberAccent : Colors.white12,
+        ),
+      ),
+      child: DropdownButtonHideUnderline(
+        child: DropdownButton<String?>(
+          value: _selectedCategory,
+          hint: const Text(
+            "CATEGORÍA: TODAS",
+            style: TextStyle(
+              fontSize: 10,
+              fontWeight: FontWeight.bold,
+              color: Colors.white54,
+            ),
+          ),
+          icon: Icon(
+            Icons.arrow_drop_down,
+            size: 16,
+            color: hasCategoryFilter ? Colors.amberAccent : Colors.white54,
+          ),
+          dropdownColor: const Color(0xFF262626),
+          style: TextStyle(
+            fontSize: 10,
+            fontWeight: FontWeight.bold,
+            fontFamily: 'monospace',
+            color: hasCategoryFilter ? Colors.amberAccent : Colors.white70,
+          ),
+          items: [
+            const DropdownMenuItem<String?>(
+              value: null,
+              child: Text("CATEGORÍA: TODAS"),
+            ),
+            ...availableCategories.map(
+              (cat) => DropdownMenuItem<String?>(
+                value: cat,
+                child: Text(cat.toUpperCase()),
+              ),
+            ),
+          ],
+          onChanged: _onFilterCategoryChanged,
+        ),
+      ),
+    );
+  }
+
   void _showMovementSheet(BuildContext context, TransactionType type) {
     showModalBottomSheet(
       context: context,
@@ -533,101 +609,156 @@ class _TransactionsScreenState extends State<TransactionsScreen> {
         borderRadius: BorderRadius.circular(8),
         border: Border.all(color: color.withValues(alpha: 0.2)),
       ),
-      child: ExpansionTile(
-        leading: CircleAvatar(
-          backgroundColor: color.withValues(alpha: 0.1),
-          child: Icon(icon, color: color, size: 20),
-        ),
-        title: Text(
-          title,
-          style: TextStyle(
-            color: color,
-            fontWeight: FontWeight.bold,
-            letterSpacing: 1.2,
-            fontSize: 13,
+      child: Material(
+        color: Colors.transparent,
+        borderRadius: BorderRadius.circular(8),
+        clipBehavior: Clip.antiAlias,
+        child: ExpansionTile(
+          shape: const Border(),
+          collapsedShape: const Border(),
+          leading: CircleAvatar(
+            backgroundColor: color.withValues(alpha: 0.1),
+            child: Icon(icon, color: color, size: 20),
           ),
-        ),
-        subtitle: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const SizedBox(height: 2),
-            Text(
-              formattedDate,
-              style: const TextStyle(fontSize: 11, color: Colors.white70),
-            ),
-            if (tx.description.isNotEmpty &&
-                tx.description != "Sin descripcion" &&
-                tx.description != "Sin descripción") ...[
-              const SizedBox(height: 2),
+          title: Row(
+            children: [
               Text(
-                tx.description,
-                style: const TextStyle(
-                  fontSize: 11,
-                  color: Colors.white54,
-                  fontStyle: FontStyle.italic,
+                title,
+                style: TextStyle(
+                  color: color,
+                  fontWeight: FontWeight.bold,
+                  letterSpacing: 1.2,
+                  fontSize: 13,
+                ),
+              ),
+              const SizedBox(width: 8),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                decoration: BoxDecoration(
+                  color: Colors.white.withValues(alpha: 0.08),
+                  borderRadius: BorderRadius.circular(4),
+                  border: Border.all(color: Colors.white12),
+                ),
+                child: Text(
+                  tx.category.toUpperCase(),
+                  style: const TextStyle(
+                    fontSize: 9,
+                    fontFamily: 'monospace',
+                    fontWeight: FontWeight.bold,
+                    color: Colors.white70,
+                  ),
                 ),
               ),
             ],
-          ],
-        ),
-        children: [
-          Container(
-            padding: const EdgeInsets.all(14),
-            width: double.infinity,
-            decoration: BoxDecoration(
-              color: Colors.black.withValues(alpha: 0.2),
-              borderRadius: const BorderRadius.vertical(
-                bottom: Radius.circular(8),
+          ),
+          subtitle: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const SizedBox(height: 2),
+              Text(
+                formattedDate,
+                style: const TextStyle(fontSize: 11, color: Colors.white70),
+              ),
+              if (tx.description.isNotEmpty &&
+                  tx.description != "Sin descripcion" &&
+                  tx.description != "Sin descripción") ...[
+                const SizedBox(height: 2),
+                Text(
+                  tx.description,
+                  style: const TextStyle(
+                    fontSize: 11,
+                    color: Colors.white54,
+                    fontStyle: FontStyle.italic,
+                  ),
+                ),
+              ],
+            ],
+          ),
+          children: [
+            Container(
+              padding: const EdgeInsets.all(14),
+              width: double.infinity,
+              decoration: BoxDecoration(
+                color: Colors.black.withValues(alpha: 0.2),
+                borderRadius: const BorderRadius.vertical(
+                  bottom: Radius.circular(8),
+                ),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: tx.items.map((item) {
+                  return Padding(
+                    padding: const EdgeInsets.only(bottom: 6.0),
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        Expanded(
+                          child: Text(
+                            item.productName,
+                            style: const TextStyle(fontSize: 13),
+                          ),
+                        ),
+                        Text(
+                          "${item.quantity} unds",
+                          style: const TextStyle(
+                            fontFamily: 'monospace',
+                            fontWeight: FontWeight.bold,
+                            color: Colors.white70,
+                          ),
+                        ),
+                      ],
+                    ),
+                  );
+                }).toList(),
               ),
             ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: tx.items.map((item) {
-                return Padding(
-                  padding: const EdgeInsets.only(bottom: 6.0),
-                  child: Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [
-                      Expanded(
-                        child: Text(
-                          item.productName,
-                          style: const TextStyle(fontSize: 13),
-                        ),
-                      ),
-                      Text(
-                        "${item.quantity} unds",
-                        style: const TextStyle(
-                          fontFamily: 'monospace',
-                          fontWeight: FontWeight.bold,
-                          color: Colors.white70,
-                        ),
-                      ),
-                    ],
-                  ),
-                );
-              }).toList(),
-            ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }
 
   Widget _buildEmptyState() {
+    final bool hasFilters =
+        _selectedType != null ||
+        _selectedCategory != null ||
+        _searchQuery.isNotEmpty;
+
     return Center(
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
           Icon(
-            Icons.history_rounded,
+            hasFilters ? Icons.filter_alt_off_rounded : Icons.history_rounded,
             size: 64,
             color: Colors.white.withValues(alpha: 0.1),
           ),
           const SizedBox(height: 16),
-          const Text(
-            "NO HAY MOVIMIENTOS REGISTRADOS",
-            style: TextStyle(color: Colors.white38),
+          Text(
+            hasFilters
+                ? "NO HAY MOVIMIENTOS EN ESTA CATEGORÍA / FILTRO"
+                : "NO HAY MOVIMIENTOS REGISTRADOS",
+            style: const TextStyle(color: Colors.white38, fontSize: 12),
           ),
+          if (hasFilters) ...[
+            const SizedBox(height: 12),
+            OutlinedButton.icon(
+              onPressed: () {
+                setState(() {
+                  _selectedType = null;
+                  _selectedCategory = null;
+                  _searchQuery = "";
+                  _currentPage = 1;
+                  _loadPage();
+                });
+              },
+              icon: const Icon(Icons.clear_all, size: 16),
+              label: const Text(
+                "LIMPIAR FILTROS",
+                style: TextStyle(fontSize: 11),
+              ),
+            ),
+          ],
         ],
       ),
     );
