@@ -75,7 +75,7 @@ class InventoryCubit extends Cubit<InventoryState> {
     }
   }
 
-  /// Registra movimientos (Entradas/Salidas)
+  /// Registra movimientos (Entradas/Salidas) actualizando el stock en memoria sin gastar lecturas extra en Turso
   Future<void> registerMovement({
     required TransactionType type,
     required Map<String, double> items,
@@ -107,10 +107,36 @@ class InventoryCubit extends Cubit<InventoryState> {
         }).toList(),
       );
 
+      // 1. Guarda la transacción y actualiza el stock en Turso
       await repository.registerTransaction(transaction);
 
-      // Tras registrar, recargamos para actualizar el stock visible
-      await loadInventory();
+      // 2. Actualizamos la lista de stock en memoria sin hacer otro SELECT completo a Turso
+      final Map<String, StockStatus> stockMap = {
+        for (final s in currentState.stockList) s.productId: s,
+      };
+
+      final now = DateTime.now();
+      for (final entry in items.entries) {
+        final existing = stockMap[entry.key];
+        final currentQty = existing?.currentQuantity ?? 0.0;
+        final newQty = type == TransactionType.inbound
+            ? currentQty + entry.value
+            : currentQty - entry.value;
+
+        stockMap[entry.key] = StockStatus(
+          productId: entry.key,
+          currentQuantity: newQty,
+          lastUpdated: now,
+        );
+      }
+
+      emit(
+        InventoryLoaded(
+          products: currentState.products,
+          stockList: stockMap.values.toList(),
+          isEmergencyMode: currentState.isEmergencyMode,
+        ),
+      );
     } catch (e) {
       emit(InventoryError("No se pudo registrar el movimiento: $e"));
     }

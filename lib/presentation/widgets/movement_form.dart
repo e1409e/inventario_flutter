@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:intl/intl.dart';
+import '../../../core/entities/stock_status.dart';
 import '../../../core/entities/inventory_transaction.dart';
 import '../../../core/entities/product.dart';
 import '../state/inventory_cubit.dart';
@@ -94,13 +95,18 @@ class _MovementFormState extends State<MovementForm> {
 
     return Container(
       constraints: BoxConstraints(
-        maxHeight: MediaQuery.of(context).size.height * 0.85,
+        maxHeight: MediaQuery.of(context).size.height * 0.88,
       ),
       child: BlocBuilder<InventoryCubit, InventoryState>(
         builder: (context, state) {
           if (state is! InventoryLoaded) {
             return const Center(child: CircularProgressIndicator());
           }
+
+          // Mapa indexado O(1) para consultar el stock actual al instante sin lecturas extra
+          final Map<String, double> stockMap = {
+            for (final s in state.stockList) s.productId: s.currentQuantity,
+          };
 
           return Column(
             children: [
@@ -112,8 +118,8 @@ class _MovementFormState extends State<MovementForm> {
                   type: StepperType.vertical,
                   currentStep: _currentStep,
                   onStepContinue: () {
-                    if (_currentStep < 2) {
-                      if (_currentStep == 0 && _selectedQuantities.isEmpty) {
+                    if (_currentStep == 0) {
+                      if (_selectedQuantities.isEmpty) {
                         ScaffoldMessenger.of(context).showSnackBar(
                           const SnackBar(
                             content: Text("Selecciona al menos un producto"),
@@ -121,6 +127,44 @@ class _MovementFormState extends State<MovementForm> {
                         );
                         return;
                       }
+                      setState(() => _currentStep++);
+                    } else if (_currentStep == 1) {
+                      // Validamos que haya cantidades > 0
+                      final hasValidQty = _selectedQuantities.values.any(
+                        (q) => q > 0,
+                      );
+                      if (!hasValidQty) {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(
+                            content: Text(
+                              "Ingresa una cantidad mayor a 0 para continuar",
+                            ),
+                          ),
+                        );
+                        return;
+                      }
+
+                      // Si es SALIDA, validamos que ningún producto supere el stock disponible
+                      if (!isInbound) {
+                        for (final entry in _selectedQuantities.entries) {
+                          final available = stockMap[entry.key] ?? 0.0;
+                          if (entry.value > available) {
+                            final prodName = state.products
+                                .firstWhere((p) => p.id == entry.key)
+                                .name;
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(
+                                backgroundColor: Colors.redAccent,
+                                content: Text(
+                                  "Stock insuficiente en '$prodName' (Disponible: ${_formatQty(available)})",
+                                ),
+                              ),
+                            );
+                            return;
+                          }
+                        }
+                      }
+
                       setState(() => _currentStep++);
                     } else {
                       _submitForm();
@@ -134,8 +178,8 @@ class _MovementFormState extends State<MovementForm> {
                     }
                   },
                   steps: [
-                    _buildStepSelection(state.products),
-                    _buildStepQuantities(state.products),
+                    _buildStepSelection(state.products, stockMap),
+                    _buildStepQuantities(state.products, stockMap),
                     _buildStepConfirmation(),
                   ],
                 ),
@@ -147,8 +191,16 @@ class _MovementFormState extends State<MovementForm> {
     );
   }
 
-  // PASO 1: Selección de productos
-  Step _buildStepSelection(List<Product> products) {
+  String _formatQty(double val) {
+    return val % 1 == 0 ? val.toStringAsFixed(0) : val.toStringAsFixed(2);
+  }
+
+  // PASO 1: Selección de productos mostrando disponibilidad en vivo
+  Step _buildStepSelection(
+    List<Product> products,
+    Map<String, double> stockMap,
+  ) {
+    final bool isInbound = widget.type == TransactionType.inbound;
     final filtered = products
         .where(
           (p) =>
@@ -175,7 +227,7 @@ class _MovementFormState extends State<MovementForm> {
           ),
           const SizedBox(height: 10),
           SizedBox(
-            height: 200,
+            height: 220,
             child: Material(
               color: Colors.transparent,
               child: ListView.builder(
@@ -183,20 +235,75 @@ class _MovementFormState extends State<MovementForm> {
                 itemBuilder: (context, index) {
                   final p = filtered[index];
                   final isSelected = _selectedQuantities.containsKey(p.id);
+                  final currentStock = stockMap[p.id] ?? 0.0;
+                  final isOutOfStock = currentStock <= 0;
+
                   return CheckboxListTile(
-                    title: Text(p.name, style: const TextStyle(fontSize: 13)),
-                    subtitle: Text(
-                      p.sku ?? "SIN SKU",
-                      style: const TextStyle(
-                        fontFamily: 'monospace',
-                        fontSize: 10,
+                    dense: true,
+                    title: Text(
+                      p.name,
+                      style: TextStyle(
+                        fontSize: 13,
+                        color: (!isInbound && isOutOfStock)
+                            ? Colors.white38
+                            : Colors.white,
                       ),
                     ),
+                    subtitle: Row(
+                      children: [
+                        Text(
+                          p.sku ?? "SIN SKU",
+                          style: const TextStyle(
+                            fontFamily: 'monospace',
+                            fontSize: 10,
+                            color: Colors.white54,
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 6,
+                            vertical: 1,
+                          ),
+                          decoration: BoxDecoration(
+                            color: isOutOfStock
+                                ? Colors.redAccent.withValues(alpha: 0.15)
+                                : Colors.greenAccent.withValues(alpha: 0.12),
+                            borderRadius: BorderRadius.circular(4),
+                          ),
+                          child: Text(
+                            "STOCK: ${_formatQty(currentStock)} ${p.unit}",
+                            style: TextStyle(
+                              fontFamily: 'monospace',
+                              fontSize: 9,
+                              fontWeight: FontWeight.bold,
+                              color: isOutOfStock
+                                  ? Colors.redAccent
+                                  : Colors.greenAccent,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
                     value: isSelected,
-                    activeColor: widget.type == TransactionType.inbound
+                    activeColor: isInbound
                         ? Colors.greenAccent
                         : Colors.orangeAccent,
                     onChanged: (val) {
+                      // Si es salida y el stock es 0, avisamos de inmediato
+                      if (val == true && !isInbound && isOutOfStock) {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          SnackBar(
+                            backgroundColor: Colors.redAccent,
+                            duration: const Duration(seconds: 2),
+                            content: Text(
+                              "'${p.name}' está agotado (Stock: 0 ${p.unit}).",
+                            ),
+                          ),
+                        );
+                        return;
+                      }
+
                       setState(() {
                         if (val == true) {
                           _selectedQuantities[p.id] = 0;
@@ -216,8 +323,12 @@ class _MovementFormState extends State<MovementForm> {
     );
   }
 
-  // PASO 2: Ingreso de cantidades
-  Step _buildStepQuantities(List<Product> products) {
+  // PASO 2: Ingreso de cantidades con cálculo en vivo y alerta de exceso
+  Step _buildStepQuantities(
+    List<Product> products,
+    Map<String, double> stockMap,
+  ) {
+    final bool isInbound = widget.type == TransactionType.inbound;
     final selectedOnes = products
         .where((p) => _selectedQuantities.containsKey(p.id))
         .toList();
@@ -226,24 +337,85 @@ class _MovementFormState extends State<MovementForm> {
       title: const Text("Definir Cantidades", style: TextStyle(fontSize: 12)),
       content: Column(
         children: selectedOnes.map((p) {
-          return Padding(
-            padding: const EdgeInsets.only(bottom: 8.0),
+          final double available = stockMap[p.id] ?? 0.0;
+          final double entered = _selectedQuantities[p.id] ?? 0.0;
+          final bool exceedsStock = !isInbound && entered > available;
+          final double projected = isInbound
+              ? available + entered
+              : available - entered;
+
+          return Container(
+            margin: const EdgeInsets.only(bottom: 10.0),
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+            decoration: BoxDecoration(
+              color: exceedsStock
+                  ? Colors.redAccent.withValues(alpha: 0.08)
+                  : Colors.white.withValues(alpha: 0.03),
+              borderRadius: BorderRadius.circular(8),
+              border: Border.all(
+                color: exceedsStock
+                    ? Colors.redAccent.withValues(alpha: 0.6)
+                    : Colors.white10,
+              ),
+            ),
             child: Row(
               children: [
                 Expanded(
-                  child: Text(p.name, style: const TextStyle(fontSize: 12)),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        p.name,
+                        style: const TextStyle(
+                          fontSize: 12,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                      const SizedBox(height: 3),
+                      Text(
+                        exceedsStock
+                            ? "⚠️ Excede disponible (${_formatQty(available)} ${p.unit})"
+                            : "Disponible: ${_formatQty(available)} ${p.unit}  →  Quedan: ${_formatQty(projected)}",
+                        style: TextStyle(
+                          fontSize: 10,
+                          fontFamily: 'monospace',
+                          color: exceedsStock
+                              ? Colors.redAccent
+                              : Colors.white54,
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
+                const SizedBox(width: 10),
                 SizedBox(
-                  width: 80,
+                  width: 90,
                   child: TextField(
-                    keyboardType: TextInputType.number,
+                    keyboardType: const TextInputType.numberWithOptions(
+                      decimal: true,
+                    ),
                     textAlign: TextAlign.center,
+                    style: TextStyle(
+                      fontSize: 13,
+                      fontWeight: FontWeight.bold,
+                      color: exceedsStock ? Colors.redAccent : Colors.white,
+                    ),
                     decoration: InputDecoration(
                       suffixText: p.unit,
                       isDense: true,
+                      enabledBorder: UnderlineInputBorder(
+                        borderSide: BorderSide(
+                          color: exceedsStock
+                              ? Colors.redAccent
+                              : Colors.white24,
+                        ),
+                      ),
                     ),
-                    onChanged: (val) =>
-                        _selectedQuantities[p.id] = double.tryParse(val) ?? 0,
+                    onChanged: (val) {
+                      setState(() {
+                        _selectedQuantities[p.id] = double.tryParse(val) ?? 0;
+                      });
+                    },
                   ),
                 ),
               ],
