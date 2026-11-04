@@ -2,37 +2,37 @@ import 'package:equatable/equatable.dart';
 import '../../../core/entities/product.dart';
 import '../../../core/entities/stock_status.dart';
 
+/// Estado base para la gestión del inventario y catálogo maestro.
 abstract class InventoryState extends Equatable {
   const InventoryState();
-  
+
   @override
   List<Object?> get props => [];
 }
 
-// 1. Estado inicial o de carga
+/// Estado emitido durante la carga inicial o sincronización de datos.
 class InventoryLoading extends InventoryState {}
 
-// 2. Estado cuando los datos están listos
+/// Estado emitido cuando el catálogo y las existencias están disponibles en memoria.
 class InventoryLoaded extends InventoryState {
   final List<Product> products;
   final List<StockStatus> stockList;
-  final bool isEmergencyMode;
   final String? errorMessage;
 
   const InventoryLoaded({
     required this.products,
     required this.stockList,
-    required this.isEmergencyMode,
     this.errorMessage,
   });
 
   @override
-  List<Object?> get props => [products, stockList, isEmergencyMode, errorMessage];
+  List<Object?> get props => [products, stockList, errorMessage];
 }
 
-// 3. Estado de error crítico
+/// Estado emitido cuando ocurre una excepción crítica en la capa de datos.
 class InventoryError extends InventoryState {
   final String message;
+
   const InventoryError(this.message);
 
   @override

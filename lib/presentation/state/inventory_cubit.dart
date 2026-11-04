@@ -1,81 +1,37 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:uuid/uuid.dart';
-import '../../../core/repositories/inventory_repository.dart';
-import 'inventory_state.dart';
 import '../../../core/entities/inventory_transaction.dart';
-import '../../../core/entities/transaction_item.dart';
 import '../../../core/entities/product.dart';
 import '../../../core/entities/stock_status.dart';
-import 'package:flutter/foundation.dart';
+import '../../../core/entities/transaction_item.dart';
+import '../../../core/repositories/inventory_repository.dart';
+import 'inventory_state.dart';
 
+/// Controlador de estado principal para las operaciones de catálogo, existencias y movimientos.
 class InventoryCubit extends Cubit<InventoryState> {
   final InventoryRepository repository;
   final Uuid _uuid = const Uuid();
 
   InventoryCubit({required this.repository}) : super(InventoryLoading());
 
-  /// Carga inicial de datos en paralelo desde Turso
+  /// Descarga en paralelo el catálogo de productos y el estado de existencias actual.
   Future<void> loadInventory() async {
-    bool isEmergency = false;
-    if (state is InventoryLoaded) {
-      isEmergency = (state as InventoryLoaded).isEmergencyMode;
-    }
-
     try {
-      // Disparamos ambas consultas al mismo tiempo (en paralelo)
       final productsFuture = repository.getAllProducts();
       final stockFuture = repository.getAllStockStatus();
 
-      // Esperamos los resultados ya tipados
       final products = await productsFuture;
       final stock = await stockFuture;
 
-      emit(
-        InventoryLoaded(
-          products: products,
-          stockList: stock,
-          isEmergencyMode: isEmergency,
-        ),
-      );
+      emit(InventoryLoaded(products: products, stockList: stock));
     } catch (e) {
-      emit(InventoryError("Error de conexion: ${e.toString()}"));
+      emit(InventoryError("Error de conexión: ${e.toString()}"));
     }
   }
 
-  /// Cambia entre base de datos local y remota
-  void toggleEmergencyMode() async {
-    if (state is InventoryLoaded) {
-      final currentState = state as InventoryLoaded;
-      final newMode = !currentState.isEmergencyMode;
-
-      // Cambiamos el switch en el repositorio
-      repository.toggleEmergencyMode(newMode);
-
-      // Feedback visual inmediato
-      emit(
-        InventoryLoaded(
-          products: currentState.products,
-          stockList: currentState.stockList,
-          isEmergencyMode: newMode,
-        ),
-      );
-
-      // Si volvemos a la NUBE (newMode == false), disparamos sincronización total
-      if (!newMode) {
-        try {
-          // Empuja cambios locales a la nube
-          await repository.syncPendingData();
-        } catch (e) {
-          debugPrint("Error al sincronizar al volver a la nube: $e");
-        }
-      }
-
-      // Recargamos todo para asegurar que la UI refleje la fuente de datos correcta
-      await loadInventory();
-    }
-  }
-
-  /// Registra movimientos (Entradas/Salidas) actualizando el stock en memoria sin gastar lecturas extra en Turso
+  /// Registra una transacción de entrada o salida y actualiza el stock en memoria
+  /// para evitar lecturas redundantes hacia la base de datos remota.
   Future<void> registerMovement({
     required TransactionType type,
     required Map<String, double> items,
@@ -107,10 +63,8 @@ class InventoryCubit extends Cubit<InventoryState> {
         }).toList(),
       );
 
-      // 1. Guarda la transacción y actualiza el stock en Turso
       await repository.registerTransaction(transaction);
 
-      // 2. Actualizamos la lista de stock en memoria sin hacer otro SELECT completo a Turso
       final Map<String, StockStatus> stockMap = {
         for (final s in currentState.stockList) s.productId: s,
       };
@@ -134,7 +88,6 @@ class InventoryCubit extends Cubit<InventoryState> {
         InventoryLoaded(
           products: currentState.products,
           stockList: stockMap.values.toList(),
-          isEmergencyMode: currentState.isEmergencyMode,
         ),
       );
     } catch (e) {
@@ -142,7 +95,7 @@ class InventoryCubit extends Cubit<InventoryState> {
     }
   }
 
-  /// Crea un nuevo producto en el catálogo
+  /// Registra un nuevo producto en el catálogo maestro.
   Future<void> addProduct({
     required String name,
     required String unit,
@@ -150,8 +103,7 @@ class InventoryCubit extends Cubit<InventoryState> {
   }) async {
     try {
       final newProduct = Product(
-        id: _uuid
-            .v4(), // Cambiado a UUID compatible con la clave primaria de la nube
+        id: _uuid.v4(),
         name: name,
         unit: unit,
         sku: sku,
@@ -164,14 +116,14 @@ class InventoryCubit extends Cubit<InventoryState> {
     }
   }
 
-  /// Actualiza un producto existente
+  /// Actualiza la información de un producto existente en el catálogo.
   Future<void> updateProduct(Product updatedProduct) async {
     try {
       await repository.updateProduct(updatedProduct);
       await loadInventory();
     } catch (e) {
-      debugPrint("Error al editar producto: $e");
-      emit(InventoryError("Error al actualizar producto"));
+      debugPrint("Error al actualizar producto: $e");
+      emit(const InventoryError("Error al actualizar producto"));
     }
   }
 }

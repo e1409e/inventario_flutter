@@ -1,16 +1,20 @@
 import 'package:libsql_dart/libsql_dart.dart';
-import 'dart:isolate';
 
+/// Contrato para las operaciones de lectura y escritura en la base de datos remota (Turso).
 abstract class RemoteDataSource {
+  /// Obtiene todos los registros del catálogo de productos.
   Future<List<Map<String, dynamic>>> fetchProducts();
-  Future<void> uploadTransaction(Map<String, dynamic> transactionJson);
-  Future<void> uploadProduct(Map<String, dynamic> productJson);
-  Future<List<Map<String, dynamic>>> fetchStockStatus();
-  Future<List<Map<String, dynamic>>> fetchTransactions();
-  Future<List> fetchTransactionsOlderThan(String cutoffIso);
-  Future<int> deleteTransactionsOlderThan(String cutoffIso);
 
-  // --- NUEVOS MÉTODOS OPTIMIZADOS (TURSO DIRECTO) ---
+  /// Inserta o actualiza un producto en el catálogo remoto.
+  Future<void> uploadProduct(Map<String, dynamic> productJson);
+
+  /// Registra una transacción con sus ítems y actualiza el stock de forma atómica.
+  Future<void> uploadTransaction(Map<String, dynamic> transactionJson);
+
+  /// Obtiene el estado de existencias actual de todos los productos.
+  Future<List<Map<String, dynamic>>> fetchStockStatus();
+
+  /// Consulta una página de transacciones aplicando filtros de flujo, categoría y búsqueda.
   Future<Map<String, dynamic>> fetchTransactionsPaginated({
     required int limit,
     required int offset,
@@ -19,20 +23,32 @@ abstract class RemoteDataSource {
     String? searchQuery,
   });
 
+  /// Calcula el total agrupado por producto para una fecha y tipo de flujo específicos.
   Future<List<Map<String, dynamic>>> fetchDailyMovementsSummary({
-    required String datePrefix, // Formato 'YYYY-MM-DD'
-    required String type, // 'inbound' o 'outbound'
+    required String datePrefix,
+    required String type,
     String? category,
   });
+
+  /// Obtiene todas las transacciones anteriores a [cutoffIso] para procesos de respaldo.
+  Future<List<Map<String, dynamic>>> fetchTransactionsOlderThan(
+    String cutoffIso,
+  );
+
+  /// Elimina de forma atómica las transacciones y sus detalles anteriores a [cutoffIso].
+  Future<int> deleteTransactionsOlderThan(String cutoffIso);
 }
 
+/// Implementación de [RemoteDataSource] basada en libSQL / Turso.
 class TursoDataSource implements RemoteDataSource {
   final LibsqlClient _client;
   bool _schemaChecked = false;
 
   TursoDataSource(this._client);
 
-  Future<void> _ensureCategoryColumn() async {
+  /// Garantiza la existencia de la columna `category` y de los índices B-Tree
+  /// necesarios para evitar escaneos completos de tabla (Full Table Scans).
+  Future<void> _ensureSchemaAndIndexes() async {
     if (_schemaChecked) return;
     try {
       await _client.execute(
@@ -40,7 +56,6 @@ class TursoDataSource implements RemoteDataSource {
       );
     } catch (_) {}
 
-    // ÍNDICES CRÍTICOS PARA EVITAR FULL TABLE SCANS EN TURSO (Ahorra 99.9% de Rows Read)
     try {
       await _client.execute(
         'CREATE INDEX IF NOT EXISTS idx_tx_items_tx_id ON transaction_items(transaction_id)',
@@ -111,7 +126,7 @@ class TursoDataSource implements RemoteDataSource {
 
   @override
   Future<void> uploadTransaction(Map<String, dynamic> txJson) async {
-    await _ensureCategoryColumn();
+    await _ensureSchemaAndIndexes();
     final tx = await _client.transaction();
     try {
       await tx.execute(
@@ -137,7 +152,7 @@ class TursoDataSource implements RemoteDataSource {
           ],
         );
 
-        final isEq = txJson['type'] == 'inbound';
+        final isInbound = txJson['type'] == 'inbound';
         final qty = (item['quantity'] as num).toDouble();
 
         await tx.execute(
@@ -145,17 +160,17 @@ class TursoDataSource implements RemoteDataSource {
           INSERT INTO stock (product_id, current_quantity, last_updated) 
           VALUES (?, ?, datetime('now'))
           ON CONFLICT(product_id) DO UPDATE SET 
-            current_quantity = current_quantity ${isEq ? '+' : '-'} ?, 
+            current_quantity = current_quantity ${isInbound ? '+' : '-'} ?, 
             last_updated = datetime('now')
           ''',
-          positional: [item['product_id'], isEq ? qty : -qty, qty],
+          positional: [item['product_id'], isInbound ? qty : -qty, qty],
         );
       }
 
       await tx.commit();
     } catch (e) {
       await tx.rollback();
-      throw Exception("Error en la transacción en Turso: $e");
+      throw Exception("Error al registrar la transacción en Turso: $e");
     }
   }
 
@@ -183,7 +198,7 @@ class TursoDataSource implements RemoteDataSource {
     String? category,
     String? searchQuery,
   }) async {
-    await _ensureCategoryColumn();
+    await _ensureSchemaAndIndexes();
     try {
       final List<String> conditions = [];
       final List<Object?> args = [];
@@ -246,7 +261,7 @@ class TursoDataSource implements RemoteDataSource {
         positional: txIds,
       );
 
-      final grouped = _procesarDatosEnSegundoPlano(
+      final grouped = _groupTransactionsWithItems(
         txsRs.toList(),
         itemsRs.toList(),
       );
@@ -263,9 +278,8 @@ class TursoDataSource implements RemoteDataSource {
     required String type,
     String? category,
   }) async {
-    await _ensureCategoryColumn();
+    await _ensureSchemaAndIndexes();
     try {
-      // Usamos rango >= y <= para que SQLite use el índice idx_tx_type_timestamp sin escanear toda la tabla
       final startOfDay = '${datePrefix}T00:00:00';
       final endOfDay = '${datePrefix}T23:59:59.999999';
 
@@ -308,22 +322,75 @@ class TursoDataSource implements RemoteDataSource {
   }
 
   @override
-  Future<List<Map<String, dynamic>>> fetchTransactions() async {
+  Future<List<Map<String, dynamic>>> fetchTransactionsOlderThan(
+    String cutoffIso,
+  ) async {
+    await _ensureSchemaAndIndexes();
     try {
-      final txs = await _client.query('SELECT * FROM transactions');
-      final items = await _client.query('SELECT * FROM transaction_items');
+      final txsRs = await _client.query(
+        'SELECT * FROM transactions WHERE timestamp < ? ORDER BY timestamp ASC',
+        positional: [cutoffIso],
+      );
 
-      final resultadoFinal = await Isolate.run(() {
-        return _procesarDatosEnSegundoPlano(txs.toList(), items.toList());
-      });
+      if (txsRs.isEmpty) return [];
 
-      return resultadoFinal;
+      final itemsRs = await _client.query(
+        '''
+        SELECT ti.* FROM transaction_items ti
+        INNER JOIN transactions t ON t.id = ti.transaction_id
+        WHERE t.timestamp < ?
+        ''',
+        positional: [cutoffIso],
+      );
+
+      return _groupTransactionsWithItems(txsRs.toList(), itemsRs.toList());
     } catch (e) {
-      throw Exception("Error al obtener historial desde Turso: $e");
+      throw Exception("Error al consultar movimientos antiguos en Turso: $e");
     }
   }
 
-  static List<Map<String, dynamic>> _procesarDatosEnSegundoPlano(
+  @override
+  Future<int> deleteTransactionsOlderThan(String cutoffIso) async {
+    final tx = await _client.transaction();
+    try {
+      final countRs = await tx.query(
+        'SELECT COUNT(*) as total FROM transactions WHERE timestamp < ?',
+        positional: [cutoffIso],
+      );
+      final int deletedCount = countRs.isNotEmpty
+          ? (countRs.first['total'] as num).toInt()
+          : 0;
+
+      if (deletedCount == 0) {
+        await tx.rollback();
+        return 0;
+      }
+
+      await tx.execute(
+        '''
+        DELETE FROM transaction_items 
+        WHERE transaction_id IN (
+          SELECT id FROM transactions WHERE timestamp < ?
+        )
+        ''',
+        positional: [cutoffIso],
+      );
+
+      await tx.execute(
+        'DELETE FROM transactions WHERE timestamp < ?',
+        positional: [cutoffIso],
+      );
+
+      await tx.commit();
+      return deletedCount;
+    } catch (e) {
+      await tx.rollback();
+      throw Exception("Error al purgar movimientos antiguos en Turso: $e");
+    }
+  }
+
+  /// Agrupa en complejidad O(N + M) las cabeceras de transacción con sus respectivos ítems.
+  static List<Map<String, dynamic>> _groupTransactionsWithItems(
     List<dynamic> txs,
     List<dynamic> items,
   ) {
@@ -358,74 +425,5 @@ class TursoDataSource implements RemoteDataSource {
             .toList(),
       };
     }).toList();
-  }
-
-  @override
-  Future<List> fetchTransactionsOlderThan(String cutoffIso) async {
-    await _ensureCategoryColumn();
-    try {
-      final txsRs = await _client.query(
-        'SELECT * FROM transactions WHERE timestamp < ? ORDER BY timestamp ASC',
-        positional: [cutoffIso],
-      );
-
-      if (txsRs.isEmpty) return [];
-
-      final itemsRs = await _client.query(
-        '''
-        SELECT ti.* FROM transaction_items ti
-        INNER JOIN transactions t ON t.id = ti.transaction_id
-        WHERE t.timestamp < ?
-        ''',
-        positional: [cutoffIso],
-      );
-
-      return _procesarDatosEnSegundoPlano(txsRs.toList(), itemsRs.toList());
-    } catch (e) {
-      throw Exception("Error al consultar movimientos antiguos en Turso: $e");
-    }
-  }
-
-  @override
-  Future<int> deleteTransactionsOlderThan(String cutoffIso) async {
-    final tx = await _client.transaction();
-    try {
-      // 1. Contamos cuántos registros se van a eliminar
-      final countRs = await tx.query(
-        'SELECT COUNT(*) as total FROM transactions WHERE timestamp < ?',
-        positional: [cutoffIso],
-      );
-      final int deletedCount = countRs.isNotEmpty
-          ? (countRs.first['total'] as num).toInt()
-          : 0;
-
-      if (deletedCount == 0) {
-        await tx.rollback();
-        return 0;
-      }
-
-      // 2. Borramos primero el detalle (transaction_items) de esas transacciones
-      await tx.execute(
-        '''
-        DELETE FROM transaction_items 
-        WHERE transaction_id IN (
-          SELECT id FROM transactions WHERE timestamp < ?
-        )
-        ''',
-        positional: [cutoffIso],
-      );
-
-      // 3. Borramos las cabeceras antiguas (transactions) sin tocar el stock actual
-      await tx.execute(
-        'DELETE FROM transactions WHERE timestamp < ?',
-        positional: [cutoffIso],
-      );
-
-      await tx.commit();
-      return deletedCount;
-    } catch (e) {
-      await tx.rollback();
-      throw Exception("Error al purgar movimientos antiguos en Turso: $e");
-    }
   }
 }

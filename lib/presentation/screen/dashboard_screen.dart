@@ -5,17 +5,16 @@ import '../../../core/utils/backup_exporter.dart';
 import '../state/inventory_cubit.dart';
 import '../state/inventory_state.dart';
 import '../widgets/menu_card.dart';
+import 'catalog_screen.dart';
 import 'inventory_screen.dart';
 import 'transactions_screen.dart';
 
-import 'catalog_screen.dart';
-
+/// Pantalla principal de navegación y administración del sistema de almacén.
 class DashboardScreen extends StatelessWidget {
   const DashboardScreen({super.key});
 
   @override
   Widget build(BuildContext context) {
-    // Formateo de fecha industrial
     final String formattedDate = DateFormat(
       'yyyy-MM-dd',
     ).format(DateTime.now());
@@ -42,45 +41,20 @@ class DashboardScreen extends StatelessWidget {
           ],
         ),
         actions: [
-          BlocBuilder<InventoryCubit, InventoryState>(
-            builder: (context, state) {
-              final isEmergency =
-                  state is InventoryLoaded && state.isEmergencyMode;
-              return Row(
-                children: [
-                  Text(
-                    isEmergency ? "LOCAL" : "CLOUD",
-                    style: TextStyle(
-                      fontSize: 9,
-                      fontWeight: FontWeight.bold,
-                      fontFamily: 'monospace',
-                      color: isEmergency
-                          ? Colors.orangeAccent
-                          : Colors.blueAccent,
-                    ),
-                  ),
-                  Transform.scale(
-                    scale: 0.8,
-                    child: Switch(
-                      value: isEmergency,
-                      activeThumbColor: Colors.orangeAccent,
-                      activeTrackColor: Colors.orangeAccent.withValues(
-                        alpha: 0.3,
-                      ),
-                      onChanged: (_) =>
-                          context.read<InventoryCubit>().toggleEmergencyMode(),
-                    ),
-                  ),
-                ],
-              );
-            },
+          IconButton(
+            icon: const Icon(
+              Icons.sync_rounded,
+              size: 20,
+              color: Colors.blueAccent,
+            ),
+            tooltip: 'Sincronizar catálogo y existencias',
+            onPressed: () => context.read<InventoryCubit>().loadInventory(),
           ),
           const SizedBox(width: 8),
         ],
       ),
       body: BlocBuilder<InventoryCubit, InventoryState>(
         builder: (context, state) {
-          // Variables dinámicas para el dashboard
           int productCount = 0;
 
           if (state is InventoryLoaded) {
@@ -95,10 +69,9 @@ class DashboardScreen extends StatelessWidget {
                 _buildSectionHeader("OPERACIONES DIARIAS"),
                 const SizedBox(height: 12),
 
-                // CARD: INVENTARIO (Estado Actual)
                 MenuCard(
                   title: "Estado de Inventario",
-                  subtitle: "Visualización de stock en tiempo real",
+                  subtitle: "Visualización de stock y reportes en tiempo real",
                   icon: Icons.inventory_2_outlined,
                   color: Colors.blueAccent,
                   onTap: () {
@@ -111,11 +84,10 @@ class DashboardScreen extends StatelessWidget {
                   },
                 ),
 
-                // CARD: MOVIMIENTOS E HISTORIAL (Unificado)
                 MenuCard(
                   title: "Movimientos",
                   subtitle:
-                      "Registro de entradas, salidas e historial completo",
+                      "Registro de entradas, salidas, historial y cierres diarios",
                   icon: Icons.swap_vert_rounded,
                   color: Colors.greenAccent,
                   onTap: () {
@@ -129,10 +101,9 @@ class DashboardScreen extends StatelessWidget {
                 ),
 
                 const SizedBox(height: 24),
-                _buildSectionHeader("ADMINISTRACIÓN"),
+                _buildSectionHeader("ADMINISTRACIÓN Y MANTENIMIENTO"),
                 const SizedBox(height: 12),
 
-                // CARD: CATÁLOGO
                 MenuCard(
                   title: "Catálogo Maestro",
                   subtitle: "$productCount productos registrados",
@@ -147,13 +118,13 @@ class DashboardScreen extends StatelessWidget {
                     );
                   },
                 ),
+
                 const SizedBox(height: 12),
 
-                // CARD: PURGAR Y RESPALDAR HISTORIAL ANTIGUO (> 3 MESES)
                 MenuCard(
                   title: "Mantenimiento de Base de Datos",
                   subtitle:
-                      "Respaldar y liberar movimientos > 3 meses en Turso",
+                      "Respaldar en bóveda local/archivos y depurar historial (> 3 meses)",
                   icon: Icons.cleaning_services_rounded,
                   color: Colors.redAccent,
                   onTap: () => _showPurgeConfirmationDialog(context),
@@ -179,13 +150,13 @@ class DashboardScreen extends StatelessWidget {
     );
   }
 
+  /// Ejecuta el asistente de respaldo histórico (SQLite local, JSON, CSV y PDF)
+  /// antes de eliminar de Turso los registros con antigüedad superior a 90 días.
   Future<void> _showPurgeConfirmationDialog(BuildContext context) async {
     final repository = context.read<InventoryCubit>().repository;
-    // Fecha de corte: exactamente hace 90 días (3 meses)
     final cutoffDate = DateTime.now().subtract(const Duration(days: 90));
     final cutoffFormatted = DateFormat('dd/MM/yyyy').format(cutoffDate);
 
-    // 1. Mostramos indicador mientras consultamos cuántos registros viejos existen
     showDialog(
       context: context,
       barrierDismissible: false,
@@ -198,13 +169,13 @@ class DashboardScreen extends StatelessWidget {
       );
 
       if (!context.mounted) return;
-      Navigator.pop(context); // Cierra el indicador de carga
+      Navigator.pop(context);
 
       if (oldTransactions.isEmpty) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text(
-              "No hay movimientos anteriores al $cutoffFormatted (más de 3 meses) para borrar.",
+              "No existen movimientos anteriores al $cutoffFormatted (> 3 meses) para depurar.",
             ),
             backgroundColor: Colors.blueGrey,
           ),
@@ -212,7 +183,6 @@ class DashboardScreen extends StatelessWidget {
         return;
       }
 
-      // 2. Variables de selección de formatos de respaldo
       bool exportJson = true;
       bool exportExcel = true;
       bool exportPdf = true;
@@ -230,100 +200,108 @@ class DashboardScreen extends StatelessWidget {
                   borderRadius: BorderRadius.circular(12),
                   side: const BorderSide(color: Colors.redAccent, width: 0.8),
                 ),
-                title: Row(
-                  children: const [
+                title: const Row(
+                  children: [
                     Icon(Icons.warning_amber_rounded, color: Colors.redAccent),
                     SizedBox(width: 10),
                     Expanded(
                       child: Text(
-                        "LIBERAR ESPACIO EN TURSO",
+                        "RESPALDO Y DEPURACIÓN HISTÓRICA",
                         style: TextStyle(
-                          fontSize: 15,
+                          fontSize: 14,
                           fontWeight: FontWeight.bold,
                         ),
                       ),
                     ),
                   ],
                 ),
-                content: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      "Se encontraron ${oldTransactions.length} movimientos registrados antes del $cutoffFormatted (> 3 meses).",
-                      style: const TextStyle(fontSize: 13, color: Colors.white),
-                    ),
-                    const SizedBox(height: 8),
-                    const Text(
-                      "• Se guardará una copia en la BD Local (SQLite).\n"
-                      "• El stock actual de tus productos NO se verá afectado.\n"
-                      "• Selecciona los archivos descargables de respaldo:",
-                      style: TextStyle(fontSize: 11, color: Colors.white70),
-                    ),
-                    const SizedBox(height: 12),
-                    CheckboxListTile(
-                      value: exportJson,
-                      dense: true,
-                      contentPadding: EdgeInsets.zero,
-                      activeColor: Colors.blueAccent,
-                      title: const Text(
-                        "Respaldo JSON (Completo)",
-                        style: TextStyle(fontSize: 12),
+                content: Material(
+                  color: Colors.transparent,
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        "Se detectaron ${oldTransactions.length} movimientos anteriores al $cutoffFormatted.",
+                        style: const TextStyle(
+                          fontSize: 13,
+                          color: Colors.white,
+                        ),
                       ),
-                      onChanged: isProcessing
-                          ? null
-                          : (v) => setDialogState(() => exportJson = v ?? true),
-                    ),
-                    CheckboxListTile(
-                      value: exportExcel,
-                      dense: true,
-                      contentPadding: EdgeInsets.zero,
-                      activeColor: Colors.greenAccent,
-                      title: const Text(
-                        "Respaldo Excel (CSV detallado)",
-                        style: TextStyle(fontSize: 12),
+                      const SizedBox(height: 8),
+                      const Text(
+                        "• Se archivarán automáticamente en la bóveda SQLite local.\n"
+                        "• El stock actual de los productos permanece intacto.\n"
+                        "• Selecciona los formatos adicionales de exportación:",
+                        style: TextStyle(fontSize: 11, color: Colors.white70),
                       ),
-                      onChanged: isProcessing
-                          ? null
-                          : (v) =>
-                                setDialogState(() => exportExcel = v ?? true),
-                    ),
-                    CheckboxListTile(
-                      value: exportPdf,
-                      dense: true,
-                      contentPadding: EdgeInsets.zero,
-                      activeColor: Colors.redAccent,
-                      title: const Text(
-                        "Reporte PDF de Auditoría",
-                        style: TextStyle(fontSize: 12),
+                      const SizedBox(height: 12),
+                      CheckboxListTile(
+                        value: exportJson,
+                        dense: true,
+                        contentPadding: EdgeInsets.zero,
+                        activeColor: Colors.blueAccent,
+                        title: const Text(
+                          "Respaldo JSON (Estructura completa)",
+                          style: TextStyle(fontSize: 12),
+                        ),
+                        onChanged: isProcessing
+                            ? null
+                            : (v) =>
+                                  setDialogState(() => exportJson = v ?? true),
                       ),
-                      onChanged: isProcessing
-                          ? null
-                          : (v) => setDialogState(() => exportPdf = v ?? true),
-                    ),
-                    if (isProcessing) ...[
-                      const SizedBox(height: 14),
-                      Row(
-                        children: const [
-                          SizedBox(
-                            width: 16,
-                            height: 16,
-                            child: CircularProgressIndicator(strokeWidth: 2),
-                          ),
-                          SizedBox(width: 12),
-                          Expanded(
-                            child: Text(
-                              "Generando respaldos y purgando Turso...",
-                              style: TextStyle(
-                                fontSize: 11,
-                                color: Colors.amberAccent,
+                      CheckboxListTile(
+                        value: exportExcel,
+                        dense: true,
+                        contentPadding: EdgeInsets.zero,
+                        activeColor: Colors.greenAccent,
+                        title: const Text(
+                          "Respaldo Excel (CSV detallado)",
+                          style: TextStyle(fontSize: 12),
+                        ),
+                        onChanged: isProcessing
+                            ? null
+                            : (v) =>
+                                  setDialogState(() => exportExcel = v ?? true),
+                      ),
+                      CheckboxListTile(
+                        value: exportPdf,
+                        dense: true,
+                        contentPadding: EdgeInsets.zero,
+                        activeColor: Colors.redAccent,
+                        title: const Text(
+                          "Reporte PDF de Auditoría",
+                          style: TextStyle(fontSize: 12),
+                        ),
+                        onChanged: isProcessing
+                            ? null
+                            : (v) =>
+                                  setDialogState(() => exportPdf = v ?? true),
+                      ),
+                      if (isProcessing) ...[
+                        const SizedBox(height: 14),
+                        const Row(
+                          children: [
+                            SizedBox(
+                              width: 16,
+                              height: 16,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            ),
+                            SizedBox(width: 12),
+                            Expanded(
+                              child: Text(
+                                "Generando respaldos y depurando Turso...",
+                                style: TextStyle(
+                                  fontSize: 11,
+                                  color: Colors.amberAccent,
+                                ),
                               ),
                             ),
-                          ),
-                        ],
-                      ),
+                          ],
+                        ),
+                      ],
                     ],
-                  ],
+                  ),
                 ),
                 actions: [
                   TextButton(
@@ -347,7 +325,7 @@ class DashboardScreen extends StatelessWidget {
                               ScaffoldMessenger.of(context).showSnackBar(
                                 const SnackBar(
                                   content: Text(
-                                    "Selecciona al menos un formato de archivo para respaldar antes de borrar.",
+                                    "Selecciona al menos un formato de archivo antes de continuar.",
                                   ),
                                 ),
                               );
@@ -357,7 +335,6 @@ class DashboardScreen extends StatelessWidget {
                             setDialogState(() => isProcessing = true);
 
                             try {
-                              // A. Creamos y descargamos los archivos físicos
                               final backupPath =
                                   await BackupExporter.generateFullBackupFiles(
                                     transactions: oldTransactions,
@@ -367,7 +344,6 @@ class DashboardScreen extends StatelessWidget {
                                     exportPdf: exportPdf,
                                   );
 
-                              // B. Respaldamos en SQLite Local (Drift) y borramos de Turso
                               final deletedCount = await repository
                                   .archiveLocallyAndDeleteFromCloud(
                                     oldTransactions,
@@ -384,7 +360,7 @@ class DashboardScreen extends StatelessWidget {
                                     duration: const Duration(seconds: 6),
                                     backgroundColor: Colors.teal.shade800,
                                     content: Text(
-                                      "¡Éxito! $deletedCount movimientos antiguos eliminados de Turso.\nRespaldo guardado en: $backupPath",
+                                      "Mantenimiento completado: $deletedCount movimientos archivados.\nUbicación: $backupPath",
                                       style: const TextStyle(fontSize: 12),
                                     ),
                                   ),
@@ -397,7 +373,7 @@ class DashboardScreen extends StatelessWidget {
                                   SnackBar(
                                     backgroundColor: Colors.redAccent,
                                     content: Text(
-                                      "Operación cancelada por seguridad (no se borró nada en Turso): $e",
+                                      "Operación abortada por seguridad (sin cambios en Turso): $e",
                                     ),
                                   ),
                                 );
@@ -406,7 +382,7 @@ class DashboardScreen extends StatelessWidget {
                           },
                     icon: const Icon(Icons.backup_rounded, size: 16),
                     label: const Text(
-                      "RESPALDAR Y BORRAR",
+                      "RESPALDAR Y DEPURAR",
                       style: TextStyle(
                         fontSize: 11,
                         fontWeight: FontWeight.bold,
@@ -424,7 +400,7 @@ class DashboardScreen extends StatelessWidget {
         Navigator.pop(context);
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text("Error al verificar registros antiguos: $e"),
+            content: Text("Error al consultar registros históricos: $e"),
             backgroundColor: Colors.redAccent,
           ),
         );
@@ -433,6 +409,7 @@ class DashboardScreen extends StatelessWidget {
   }
 }
 
+/// Barra inferior de estado operativo del sistema.
 class _ConnectionStatusBar extends StatelessWidget {
   const _ConnectionStatusBar();
 
@@ -440,8 +417,8 @@ class _ConnectionStatusBar extends StatelessWidget {
   Widget build(BuildContext context) {
     return BlocBuilder<InventoryCubit, InventoryState>(
       builder: (context, state) {
-        final isEmergency = state is InventoryLoaded && state.isEmergencyMode;
-        final baseColor = isEmergency ? Colors.orangeAccent : Colors.blueAccent;
+        final hasError = state is InventoryError;
+        final baseColor = hasError ? Colors.redAccent : Colors.blueAccent;
 
         return Container(
           height: 28,
@@ -461,17 +438,17 @@ class _ConnectionStatusBar extends StatelessWidget {
               Row(
                 children: [
                   Icon(
-                    isEmergency
-                        ? Icons.portable_wifi_off_rounded
+                    hasError
+                        ? Icons.cloud_off_rounded
                         : Icons.cloud_done_rounded,
                     color: baseColor,
                     size: 14,
                   ),
                   const SizedBox(width: 8),
                   Text(
-                    isEmergency
-                        ? "MODO LOCAL (SQLITE)"
-                        : "SISTEMA ONLINE (CLOUD)",
+                    hasError
+                        ? "ERROR DE CONEXIÓN REMOTA"
+                        : "SISTEMA ONLINE (TURSO CLOUD + BÓVEDA LOCAL)",
                     style: TextStyle(
                       color: baseColor,
                       fontWeight: FontWeight.bold,
@@ -492,7 +469,7 @@ class _ConnectionStatusBar extends StatelessWidget {
                 )
               else
                 Text(
-                  isEmergency ? "OFFLINE-STABLE" : "SYNC-ACTIVE",
+                  hasError ? "RETRY-REQUIRED" : "CLOUD-READY",
                   style: TextStyle(
                     color: baseColor.withValues(alpha: 0.5),
                     fontSize: 8,

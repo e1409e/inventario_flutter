@@ -4,10 +4,9 @@ import 'package:drift/native.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:path/path.dart' as p;
 
-// Este archivo se generará automáticamente después
 part 'local_database.g.dart';
 
-// 1. Tabla de Productos
+/// Tabla local para el respaldo del catálogo de productos.
 class ProductsTable extends Table {
   TextColumn get id => text()();
   TextColumn get name => text().withLength(min: 1, max: 100)();
@@ -21,7 +20,7 @@ class ProductsTable extends Table {
   Set<Column> get primaryKey => {id};
 }
 
-// 2. Tabla de Stock (Estado actual)
+/// Tabla local para el respaldo del estado de existencias.
 class StockTable extends Table {
   TextColumn get productId => text().references(ProductsTable, #id)();
   RealColumn get currentQuantity => real()();
@@ -31,11 +30,11 @@ class StockTable extends Table {
   Set<Column> get primaryKey => {productId};
 }
 
-// 3. Tabla de Transacciones (Cabecera)
+/// Tabla local para el archivo histórico de cabeceras de transacciones.
 class TransactionsTable extends Table {
   TextColumn get id => text()();
   DateTimeColumn get timestamp => dateTime()();
-  TextColumn get type => text()(); // 'inbound' o 'outbound'
+  TextColumn get type => text()();
   TextColumn get description => text().nullable()();
   BoolColumn get isSynced => boolean().withDefault(const Constant(false))();
 
@@ -43,7 +42,7 @@ class TransactionsTable extends Table {
   Set<Column> get primaryKey => {id};
 }
 
-// 4. Tabla de Detalles de Transacción (Líneas de la factura)
+/// Tabla local para el archivo histórico de líneas de detalle por transacción.
 class TransactionItemsTable extends Table {
   IntColumn get id => integer().autoIncrement()();
   TextColumn get transactionId => text().references(TransactionsTable, #id)();
@@ -52,8 +51,9 @@ class TransactionItemsTable extends Table {
   RealColumn get quantity => real()();
 }
 
-// --- EL CEREBRO DE LA BASE DE DATOS ---
-
+/// Motor de base de datos SQLite local administrado por Drift.
+/// Actúa como bóveda de almacenamiento histórico para registros depurados de la nube
+/// y como caché de contingencia de solo lectura.
 @DriftDatabase(
   tables: [ProductsTable, StockTable, TransactionsTable, TransactionItemsTable],
 )
@@ -61,10 +61,9 @@ class LocalDatabase extends _$LocalDatabase {
   LocalDatabase() : super(_openConnection());
 
   @override
-  int get schemaVersion => 1; // Aquí manejaremos las migraciones en el futuro
+  int get schemaVersion => 1;
 }
 
-// Función para ubicar el archivo .db en el disco (SSD o Almacenamiento Móvil)
 LazyDatabase _openConnection() {
   return LazyDatabase(() async {
     final dbFolder = await getApplicationDocumentsDirectory();

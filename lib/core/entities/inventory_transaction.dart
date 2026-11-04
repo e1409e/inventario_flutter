@@ -1,10 +1,13 @@
 import 'transaction_item.dart';
 
+/// Define la dirección del flujo de mercancía en el almacén.
 enum TransactionType { inbound, outbound }
 
+/// Catálogo centralizado de motivos operativos para clasificar movimientos.
 class TransactionCategories {
   static const String defaultCategory = 'Sin Definir';
 
+  /// Categorías válidas para salidas de almacén ([TransactionType.outbound]).
   static const List<String> outboundCategories = [
     'Facturas',
     'Tienda',
@@ -15,6 +18,7 @@ class TransactionCategories {
     'Sin Definir',
   ];
 
+  /// Categorías válidas para entradas de almacén ([TransactionType.inbound]).
   static const List<String> inboundCategories = [
     'Entrega',
     'Devolucion',
@@ -23,6 +27,7 @@ class TransactionCategories {
     'Sin Definir',
   ];
 
+  /// Retorna la lista de categorías correspondiente al [type] especificado.
   static List<String> forType(TransactionType type) {
     return type == TransactionType.inbound
         ? inboundCategories
@@ -30,31 +35,49 @@ class TransactionCategories {
   }
 }
 
+/// Representa un movimiento de inventario (entrada o salida) con su detalle.
 class InventoryTransaction {
-  final String id; // UUID
+  /// Identificador único de la transacción (UUID v4).
+  final String id;
+
+  /// Fecha y hora contable del movimiento.
   final DateTime timestamp;
+
+  /// Tipo de operación (entrada o salida).
   final TransactionType type;
-  final String category; // <-- NUEVO CAMPO DE CATEGORÍA
+
+  /// Categoría operativa del movimiento.
+  final String category;
+
+  /// Nota u observación adicional asociada al registro.
   final String description;
+
+  /// Lista de productos y cantidades involucradas en la operación.
   final List<TransactionItem> items;
+
+  /// Indica si el registro se encuentra respaldado en la nube.
   final bool isSynced;
+
+  /// Identificador opcional del operador responsable (auditoría).
   final String? userId;
 
-  InventoryTransaction({
+  const InventoryTransaction({
     required this.id,
     required this.timestamp,
     required this.type,
     this.category = TransactionCategories.defaultCategory,
     required this.description,
     required this.items,
-    this.isSynced = false,
+    this.isSynced = true,
     this.userId,
   });
 
+  /// Verifica si un producto específico forma parte de esta transacción.
   bool containsProduct(String productId) {
     return items.any((item) => item.productId == productId);
   }
 
+  /// Crea una copia de la transacción actualizando las propiedades indicadas.
   InventoryTransaction copyWith({bool? isSynced, String? category}) {
     return InventoryTransaction(
       id: id,

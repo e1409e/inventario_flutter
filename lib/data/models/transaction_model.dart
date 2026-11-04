@@ -1,25 +1,27 @@
+import 'package:drift/drift.dart';
 import '../../core/entities/inventory_transaction.dart';
 import '../../core/entities/transaction_item.dart';
 import '../datasources/local_database.dart';
-import 'package:drift/drift.dart';
 
+/// Modelo de datos para serializar y persistir instancias de [InventoryTransaction].
 class TransactionModel extends InventoryTransaction {
-  TransactionModel({
+  const TransactionModel({
     required super.id,
     required super.timestamp,
     required super.type,
     super.category = TransactionCategories.defaultCategory,
     required super.description,
     required super.items,
-    super.isSynced,
+    super.isSynced = true,
   });
 
+  /// Convierte la transacción a un mapa JSON estructurado para su envío a Turso.
   Map<String, dynamic> toJson() {
     return {
       'id': id,
       'timestamp': timestamp.toIso8601String(),
       'type': type == TransactionType.inbound ? 'inbound' : 'outbound',
-      'category': category, // <-- Se envía a Turso
+      'category': category,
       'description': description,
       'is_synced': isSynced,
       'items': items
@@ -34,6 +36,7 @@ class TransactionModel extends InventoryTransaction {
     };
   }
 
+  /// Convierte la cabecera de la transacción en una entidad compatible con Drift (SQLite local).
   TransactionsTableCompanion toDrift() {
     return TransactionsTableCompanion.insert(
       id: id,
@@ -44,6 +47,7 @@ class TransactionModel extends InventoryTransaction {
     );
   }
 
+  /// Convierte la lista de ítems de la transacción en entidades compatibles con Drift.
   static List<TransactionItemsTableCompanion> itemsToDrift(
     String txId,
     List<TransactionItem> items,

@@ -130,7 +130,7 @@ class _DailyReportSheetState extends State<DailyReportSheet> {
       if (mounted) {
         await Printing.layoutPdf(
           onLayout: (format) async => pdfBytes,
-          name: 'Reporte_${tipoStr}${catSuffix}_$dateStr.pdf',
+          name: 'Reporte_$tipoStr${catSuffix}_$dateStr.pdf',
         );
       }
     } catch (e) {

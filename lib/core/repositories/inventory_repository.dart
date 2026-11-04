@@ -3,34 +3,31 @@ import '../entities/stock_status.dart';
 import '../entities/inventory_transaction.dart';
 import '../entities/paginated_transactions.dart';
 
+/// Contrato principal para la gestión de catálogo, existencias, movimientos y respaldos.
 abstract class InventoryRepository {
-  // --- GESTIÓN DE PRODUCTOS ---
+  // --- CATÁLOGO DE PRODUCTOS ---
 
-  /// Obtiene todos los productos (activos e inactivos)
+  /// Obtiene la lista completa de productos registrados en el catálogo.
   Future<List<Product>> getAllProducts();
 
-  /// Guarda la información básica de un producto nuevo
+  /// Registra un nuevo producto en la base de datos principal.
   Future<void> saveProduct(Product product);
 
-  /// Actualiza la información de un producto existente
+  /// Actualiza los datos de un producto existente en el catálogo.
   Future<void> updateProduct(Product product);
 
-  // --- GESTIÓN DE STOCK Y MOVIMIENTOS ---
+  // --- EXISTENCIAS Y MOVIMIENTOS ---
 
-  /// Registra una entrada o Salida.
-  /// Debe ser una operación ATÓMICA (afecta movimientos y stock al mismo tiempo).
+  /// Registra una transacción de entrada o salida actualizando el stock de forma atómica.
   Future<void> registerTransaction(InventoryTransaction transaction);
 
-  /// Obtiene el estado de stock actual de un producto específico
+  /// Consulta la existencia actual de un producto específico por su [productId].
   Future<StockStatus?> getStockByProduct(String productId);
 
-  /// Obtiene todos los estados de stock (para la lista principal)
+  /// Obtiene el estado de stock actual de todos los productos.
   Future<List<StockStatus>> getAllStockStatus();
 
-  /// Obtiene el historial completo de movimientos (cabeceras y detalles)
-  Future<List<InventoryTransaction>> getTransactionHistory();
-
-  /// Obtiene el historial paginado directamente desde Turso
+  /// Obtiene una página de movimientos filtrada directamente desde la base de datos remota.
   Future<PaginatedTransactions> getTransactionsPaginated({
     required int page,
     int pageSize = 15,
@@ -39,29 +36,23 @@ abstract class InventoryRepository {
     String? searchQuery,
   });
 
-  /// Obtiene el total agrupado de entradas o salidas de un día específico
+  /// Obtiene los totales consolidados por producto para una fecha y flujo específicos.
   Future<List<DailyProductMovement>> getDailyMovementsSummary({
     required DateTime date,
     required TransactionType type,
     String? category,
   });
 
-  // --- MODO EMERGENCIA Y SINCRONIZACIÓN ---
+  // --- MANTENIMIENTO Y BÓVEDA DE RESPALDO LOCAL ---
 
-  /// Sincroniza los datos locales pendientes con la nube (Supabase)
-  Future<void> syncPendingData();
-
-  /// Obtiene las transacciones anteriores a la fecha de corte para respaldarlas
+  /// Consulta las transacciones registradas antes de [cutoffDate] para procesos de respaldo.
   Future<List<InventoryTransaction>> getTransactionsOlderThan(
     DateTime cutoffDate,
   );
 
-  /// Guarda las transacciones antiguas en SQLite local (Drift) y las elimina de Turso
+  /// Archiva las transacciones antiguas en la base de datos local (SQLite) y las depura de Turso.
   Future<int> archiveLocallyAndDeleteFromCloud(
     List<InventoryTransaction> oldTransactions,
     DateTime cutoffDate,
   );
-
-  /// Cambia entre base de datos local (SQLite) y nube
-  void toggleEmergencyMode(bool isEnabled);
 }
